@@ -7,7 +7,7 @@ public static class QueryCommand
 {
     public static Command Create()
     {
-        var command = new Command("query", "Perform BM25 similarity search against a Lucene.NET index");
+        var command = new Command("query", "Perform search against an index using BM25, vector, or hybrid modes");
 
         var indexPathOption = new Option<string>(
             aliases: ["--index-path"],
@@ -38,17 +38,35 @@ public static class QueryCommand
             IsRequired = false
         };
 
+        var searchModeOption = new Option<string>(
+            aliases: ["--search-mode"],
+            description: "Search mode: 'bm25' (keyword), 'vector' (semantic), or 'hybrid' (combined)")
+        {
+            IsRequired = false
+        };
+        searchModeOption.SetDefaultValue("bm25");
+
         command.AddOption(indexPathOption);
         command.AddOption(queryOption);
         command.AddOption(maxResultsOption);
         command.AddOption(sourceIdsOption);
+        command.AddOption(searchModeOption);
 
-        command.SetHandler(async (string indexPath, string query, int maxResults, string[] sourceIds) =>
+        command.SetHandler(async (string indexPath, string query, int maxResults, string[] sourceIds, string searchModeStr) =>
         {
             try
             {
+                var searchMode = ParseSearchMode(searchModeStr);
                 var indexer = new SearchIndexer();
-                var results = await indexer.QueryAsync(indexPath, query, maxResults, sourceIds);
+
+                // Set up embedding service for vector/hybrid search
+                if (searchMode is SearchMode.Vector or SearchMode.Hybrid)
+                {
+                    var embeddingService = new OpenAIEmbeddingService();
+                    indexer.SetEmbeddingService(embeddingService);
+                }
+
+                var results = await indexer.SearchAsync(indexPath, query, searchMode, maxResults, sourceIds);
 
                 if (results.Count == 0)
                 {
@@ -56,7 +74,7 @@ public static class QueryCommand
                     return;
                 }
 
-                Console.WriteLine($"Found {results.Count} result(s):");
+                Console.WriteLine($"Found {results.Count} result(s) using {searchModeStr} search:");
                 Console.WriteLine();
 
                 for (int i = 0; i < results.Count; i++)
@@ -77,8 +95,19 @@ public static class QueryCommand
                 Console.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, indexPathOption, queryOption, maxResultsOption, sourceIdsOption);
+        }, indexPathOption, queryOption, maxResultsOption, sourceIdsOption, searchModeOption);
 
         return command;
+    }
+
+    private static SearchMode ParseSearchMode(string mode)
+    {
+        return mode.ToLowerInvariant() switch
+        {
+            "bm25" => SearchMode.Bm25,
+            "vector" => SearchMode.Vector,
+            "hybrid" => SearchMode.Hybrid,
+            _ => throw new ArgumentException($"Unknown search mode: {mode}. Valid modes are: bm25, vector, hybrid")
+        };
     }
 }

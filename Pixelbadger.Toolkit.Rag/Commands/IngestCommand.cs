@@ -30,26 +30,48 @@ public static class IngestCommand
             IsRequired = false
         };
 
+        var enableVectorsOption = new Option<bool>(
+            aliases: ["--enable-vectors"],
+            description: "Enable vector storage using sqlite-vec for semantic search (requires OPENAI_API_KEY environment variable)")
+        {
+            IsRequired = false
+        };
+        enableVectorsOption.SetDefaultValue(false);
+
         command.AddOption(indexPathOption);
         command.AddOption(contentPathOption);
         command.AddOption(chunkingStrategyOption);
+        command.AddOption(enableVectorsOption);
 
-        command.SetHandler(async (string indexPath, string contentPath, string? chunkingStrategy) =>
+        command.SetHandler(async (string indexPath, string contentPath, string? chunkingStrategy, bool enableVectors) =>
         {
             try
             {
                 var indexer = new SearchIndexer();
-                await indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy);
+
+                if (enableVectors)
+                {
+                    var embeddingService = new OpenAIEmbeddingService();
+                    indexer.SetEmbeddingService(embeddingService);
+                }
+
+                var options = new IngestOptions
+                {
+                    EnableVectorStorage = enableVectors
+                };
+
+                await indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy, options);
 
                 var strategyUsed = chunkingStrategy ?? "auto-detected";
-                Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking");
+                var vectorStatus = enableVectors ? " with vector embeddings" : "";
+                Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking{vectorStatus}");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, indexPathOption, contentPathOption, chunkingStrategyOption);
+        }, indexPathOption, contentPathOption, chunkingStrategyOption, enableVectorsOption);
 
         return command;
     }
