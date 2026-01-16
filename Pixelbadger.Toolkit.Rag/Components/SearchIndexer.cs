@@ -89,16 +89,13 @@ public class SearchIndexer
         // Lucene BM25 indexing
         await IndexWithLuceneAsync(indexPath, contentPath, nonEmptyChunks);
 
-        // Vector storage (if enabled)
-        if (options.EnableVectorStorage)
+        // Vector storage (always enabled for eval harness)
+        if (_embeddingService == null)
         {
-            if (_embeddingService == null)
-            {
-                throw new InvalidOperationException("Embedding service is required for vector storage. Call SetEmbeddingService first.");
-            }
-
-            await StoreVectorsAsync(indexPath, contentPath, nonEmptyChunks);
+            throw new InvalidOperationException("Embedding service is required for vector storage. Call SetEmbeddingService first.");
         }
+
+        await StoreVectorsAsync(indexPath, contentPath, nonEmptyChunks);
     }
 
     private async Task IndexWithLuceneAsync(string indexPath, string contentPath, List<IChunk> chunks)

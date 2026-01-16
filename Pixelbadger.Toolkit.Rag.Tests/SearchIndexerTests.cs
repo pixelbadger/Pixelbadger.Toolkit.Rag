@@ -12,6 +12,7 @@ public class SearchIndexerTests : IDisposable
     public SearchIndexerTests()
     {
         _indexer = new SearchIndexer();
+        _indexer.SetEmbeddingService(new MockEmbeddingService());
         _testDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(_testDirectory);
         _indexPath = Path.Combine(_testDirectory, "test-index");

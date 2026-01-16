@@ -30,48 +30,35 @@ public static class IngestCommand
             IsRequired = false
         };
 
-        var enableVectorsOption = new Option<bool>(
-            aliases: ["--enable-vectors"],
-            description: "Enable vector storage using sqlite-vec for semantic search (requires OPENAI_API_KEY environment variable)")
-        {
-            IsRequired = false
-        };
-        enableVectorsOption.SetDefaultValue(false);
-
         command.AddOption(indexPathOption);
         command.AddOption(contentPathOption);
         command.AddOption(chunkingStrategyOption);
-        command.AddOption(enableVectorsOption);
 
-        command.SetHandler(async (string indexPath, string contentPath, string? chunkingStrategy, bool enableVectors) =>
+        command.SetHandler(async (string indexPath, string contentPath, string? chunkingStrategy) =>
         {
             try
             {
                 var indexer = new SearchIndexer();
 
-                if (enableVectors)
-                {
-                    var embeddingService = new OpenAIEmbeddingService();
-                    indexer.SetEmbeddingService(embeddingService);
-                }
+                var embeddingService = new OpenAIEmbeddingService();
+                indexer.SetEmbeddingService(embeddingService);
 
                 var options = new IngestOptions
                 {
-                    EnableVectorStorage = enableVectors
+                    EnableVectorStorage = true
                 };
 
                 await indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy, options);
 
                 var strategyUsed = chunkingStrategy ?? "auto-detected";
-                var vectorStatus = enableVectors ? " with vector embeddings" : "";
-                Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking{vectorStatus}");
+                Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, indexPathOption, contentPathOption, chunkingStrategyOption, enableVectorsOption);
+        }, indexPathOption, contentPathOption, chunkingStrategyOption);
 
         return command;
     }

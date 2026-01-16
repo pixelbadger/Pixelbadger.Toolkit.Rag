@@ -29,7 +29,7 @@ public class ChunkVectorRecord
     [VectorStoreData]
     public string DocumentId { get; set; } = string.Empty;
 
-    [VectorStoreVector(OpenAIEmbeddingService.EmbeddingDimensions, DistanceFunction = DistanceFunction.CosineSimilarity)]
+    [VectorStoreVector(3072, DistanceFunction = DistanceFunction.EuclideanDistance)]
     public ReadOnlyMemory<float> Embedding { get; set; }
 }
 
@@ -121,9 +121,11 @@ public class VectorStore : IAsyncDisposable
         var results = new List<SearchResult>();
         await foreach (var result in searchResults.WithCancellation(cancellationToken))
         {
+            var distance = (float)(result.Score ?? 0);
+            var similarity = 1.0f - (distance * distance) / 2.0f; // Convert Euclidean distance to cosine similarity for normalized vectors
             results.Add(new SearchResult
             {
-                Score = (float)(result.Score ?? 0),
+                Score = similarity,
                 Content = result.Record.Content,
                 SourceFile = result.Record.SourceFile,
                 SourcePath = result.Record.SourcePath,
