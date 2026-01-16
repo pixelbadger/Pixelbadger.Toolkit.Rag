@@ -1,4 +1,6 @@
 using System.CommandLine;
+using System.Text.Json;
+using Microsoft.Extensions.AI;
 using Pixelbadger.Toolkit.Rag.Components;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
@@ -30,11 +32,19 @@ public static class IngestCommand
             IsRequired = false
         };
 
+        var evalsOption = new Option<int?>(
+            aliases: ["--evals"],
+            description: "Generate evaluation queries after ingestion (requires OPENAI_API_KEY). Number specifies how many query/answer pairs to generate.")
+        {
+            IsRequired = false
+        };
+
         command.AddOption(indexPathOption);
         command.AddOption(contentPathOption);
         command.AddOption(chunkingStrategyOption);
+        command.AddOption(evalsOption);
 
-        command.SetHandler(async (string indexPath, string contentPath, string? chunkingStrategy) =>
+        command.SetHandler(async (string indexPath, string contentPath, string? chunkingStrategy, int? evalsCount) =>
         {
             try
             {
@@ -52,14 +62,62 @@ public static class IngestCommand
 
                 var strategyUsed = chunkingStrategy ?? "auto-detected";
                 Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");
+
+                if (evalsCount.HasValue && evalsCount.Value > 0)
+                {
+                    Console.WriteLine($"Generating {evalsCount.Value} evaluation queries...");
+                    await GenerateEvaluationQueriesAsync(indexPath, contentPath, evalsCount.Value);
+                    Console.WriteLine($"Evaluation queries saved to '{Path.Combine(indexPath, "evals.json")}'");
+                }
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, indexPathOption, contentPathOption, chunkingStrategyOption);
+        }, indexPathOption, contentPathOption, chunkingStrategyOption, evalsOption);
 
         return command;
     }
+
+    private static async Task GenerateEvaluationQueriesAsync(string indexPath, string contentPath, int count)
+    {
+        var content = await File.ReadAllTextAsync(contentPath);
+        var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            throw new InvalidOperationException("OPENAI_API_KEY environment variable is required for eval generation");
+        }
+
+        var openAIClient = new OpenAI.OpenAIClient(apiKey);
+        IChatClient chatClient = openAIClient.GetChatClient("gpt-4o-mini").AsIChatClient();
+
+        var prompt = $@"
+Generate {count} diverse questions that can be answered using the information in the following document.
+For each question, also provide the expected answer based on the document content.
+
+Format the output as a JSON array of objects, each with 'question' and 'expectedAnswer' fields.
+
+Document content:
+{content}
+";
+
+        var response = await chatClient.GetResponseAsync(prompt);
+        var jsonText = response.Text ?? "[]";
+
+        // Parse and validate JSON
+        var evals = JsonSerializer.Deserialize<List<EvalPair>>(jsonText);
+        if (evals == null || evals.Count == 0)
+        {
+            throw new InvalidOperationException("Failed to generate evaluation queries");
+        }
+
+        // Limit to requested count
+        evals = evals.Take(count).ToList();
+
+        var evalsPath = Path.Combine(indexPath, "evals.json");
+        await File.WriteAllTextAsync(evalsPath, JsonSerializer.Serialize(evals, new JsonSerializerOptions { WriteIndented = true }));
+    }
+
+    private record EvalPair(string Question, string ExpectedAnswer);
 }

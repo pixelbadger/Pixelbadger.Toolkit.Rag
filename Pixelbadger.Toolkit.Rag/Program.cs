@@ -5,6 +5,7 @@ var rootCommand = new RootCommand("RAG toolkit for BM25 search indexing, queryin
 
 rootCommand.AddCommand(IngestCommand.Create());
 rootCommand.AddCommand(QueryCommand.Create());
+rootCommand.AddCommand(EvalCommand.Create());
 rootCommand.AddCommand(ServeCommand.Create());
 
 return await rootCommand.InvokeAsync(args);
