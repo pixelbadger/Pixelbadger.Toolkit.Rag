@@ -97,8 +97,9 @@ public class SemanticChunkerTests
         // Act
         var chunks = await chunker.ChunkTextAsync(content);
 
-        // Assert
-        chunks.Should().BeEmpty();
+        // Assert - SemanticChunker.NET 1.1.0 returns a single chunk with empty content
+        chunks.Should().HaveCount(1);
+        chunks[0].Content.Should().BeEmpty();
     }
 
     [Fact]
