@@ -82,14 +82,14 @@ public class SemanticTextChunker : ITextChunker
     private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
     private readonly int _tokenLimit;
     private readonly int _bufferSize;
-    private readonly ThresholdType _thresholdType;
+    private readonly BreakpointThresholdType _thresholdType;
     private readonly double _thresholdAmount;
 
     public SemanticTextChunker(
         string? apiKey = null,
         int tokenLimit = 512,
         int bufferSize = 1,
-        ThresholdType thresholdType = ThresholdType.Percentile,
+        BreakpointThresholdType thresholdType = BreakpointThresholdType.Percentile,
         double thresholdAmount = 95)
     {
         // Get API key from environment if not provided
@@ -101,7 +101,8 @@ public class SemanticTextChunker : ITextChunker
 
         // Create OpenAI embedding generator using Microsoft.Extensions.AI
         var openAIClient = new OpenAI.OpenAIClient(apiKey);
-        _embeddingGenerator = openAIClient.AsEmbeddingGenerator("text-embedding-3-large");
+        var embeddingClient = openAIClient.GetEmbeddingClient("text-embedding-3-large");
+        _embeddingGenerator = embeddingClient.AsIEmbeddingGenerator();
 
         _tokenLimit = tokenLimit;
         _bufferSize = bufferSize;

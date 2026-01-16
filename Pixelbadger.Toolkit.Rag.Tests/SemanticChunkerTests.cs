@@ -46,7 +46,7 @@ public class SemanticChunkerTests
     public void SemanticChunkWrapper_ShouldImplementIChunk()
     {
         // Arrange
-        var chunk = new Chunk("chunk-id", "Test content", new Embedding<float>(new float[] { 0.1f, 0.2f }));
+        var chunk = new Chunk { Id = "chunk-id", Text = "Test content", Embedding = new Embedding<float>(new float[] { 0.1f, 0.2f }) };
 
         // Act
         var wrapper = new SemanticChunkWrapper(chunk, 1);
@@ -126,14 +126,14 @@ public class SemanticChunkerTests
         private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
         private readonly int _tokenLimit;
         private readonly int _bufferSize;
-        private readonly ThresholdType _thresholdType;
+        private readonly BreakpointThresholdType _thresholdType;
         private readonly double _thresholdAmount;
 
         public TestableSemanticTextChunker(
             IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
             int tokenLimit = 512,
             int bufferSize = 1,
-            ThresholdType thresholdType = ThresholdType.Percentile,
+            BreakpointThresholdType thresholdType = BreakpointThresholdType.Percentile,
             double thresholdAmount = 95)
         {
             _embeddingGenerator = embeddingGenerator;
