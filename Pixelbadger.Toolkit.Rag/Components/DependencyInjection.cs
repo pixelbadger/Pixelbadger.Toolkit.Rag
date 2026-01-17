@@ -1,7 +1,10 @@
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http.Resilience;
 using Pixelbadger.Toolkit.Rag.Commands;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
+using Polly;
+using System.Net;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
@@ -9,13 +12,44 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddRagServices(this IServiceCollection services)
     {
+        // Configure HttpClient with retry policy for OpenAI API
+        services.AddHttpClient("OpenAI")
+            .AddStandardResilienceHandler(options =>
+            {
+                // Configure retry policy for rate limiting (429) and transient errors
+                options.Retry.MaxRetryAttempts = 5;
+                options.Retry.Delay = TimeSpan.FromSeconds(2);
+                options.Retry.BackoffType = Polly.DelayBackoffType.Exponential;
+                options.Retry.UseJitter = true;
+
+                // Handle 429 (Too Many Requests) specifically
+                options.Retry.ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
+                    .HandleResult(response =>
+                        response.StatusCode == HttpStatusCode.TooManyRequests || // 429
+                        response.StatusCode == HttpStatusCode.RequestTimeout || // 408
+                        response.StatusCode == HttpStatusCode.ServiceUnavailable || // 503
+                        (int)response.StatusCode >= 500); // 5xx errors
+
+                // Configure circuit breaker to prevent overwhelming the API
+                options.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(30);
+                options.CircuitBreaker.FailureRatio = 0.5;
+                options.CircuitBreaker.MinimumThroughput = 10;
+                options.CircuitBreaker.BreakDuration = TimeSpan.FromSeconds(30);
+
+                // Configure timeout
+                options.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(2);
+            });
+
         services.AddSingleton<IEmbeddingService, OpenAIEmbeddingService>();
         services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
         {
             var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
             if (string.IsNullOrEmpty(apiKey))
                 throw new InvalidOperationException("OPENAI_API_KEY environment variable is required");
-            var client = new OpenAI.OpenAIClient(apiKey);
+
+            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            var httpClient = httpClientFactory.CreateClient("OpenAI");
+            var client = new OpenAI.OpenAIClient(apiKey, new OpenAI.OpenAIClientOptions { Transport = new OpenAI.HttpClientTransport(httpClient) });
             var embeddingClient = client.GetEmbeddingClient("text-embedding-3-large");
             return embeddingClient.AsIEmbeddingGenerator();
         });
@@ -44,7 +78,10 @@ public static class DependencyInjection
             var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
             if (string.IsNullOrEmpty(apiKey))
                 throw new InvalidOperationException("OPENAI_API_KEY environment variable is required");
-            var client = new OpenAI.OpenAIClient(apiKey);
+
+            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            var httpClient = httpClientFactory.CreateClient("OpenAI");
+            var client = new OpenAI.OpenAIClient(apiKey, new OpenAI.OpenAIClientOptions { Transport = new OpenAI.HttpClientTransport(httpClient) });
             return client.GetChatClient("gpt-4o-mini").AsIChatClient();
         });
 
