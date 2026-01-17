@@ -1,6 +1,7 @@
 using System.CommandLine;
 using System.Text.Json;
 using Pixelbadger.Toolkit.Rag.Components;
+using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
