@@ -1,6 +1,6 @@
 # Pixelbadger.Toolkit.Rag
 
-A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 search indexing, querying, semantic chunking, and MCP server functionality powered by Lucene.NET.
+A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 and vector similarity search indexing, querying, semantic chunking, and MCP server functionality powered by Lucene.NET and sqlite-vec.
 
 ## Table of Contents
 
@@ -70,6 +70,7 @@ pbrag ingest --index-path <index-directory> --content-path <content-file>
 - `--index-path`: Path to the Lucene.NET index directory (required)
 - `--content-path`: Path to the content file to ingest (required)
 - `--chunking-strategy`: Chunking strategy to use: `semantic`, `markdown`, or `paragraph` (optional, default: auto-detect)
+- `--enable-vectors`: Enable vector storage for semantic search (optional, default: false)
 
 **Examples:**
 ```bash
@@ -82,6 +83,10 @@ pbrag ingest --index-path ./search-index --content-path readme.md --chunking-str
 # Ingest with semantic chunking (requires OPENAI_API_KEY environment variable)
 export OPENAI_API_KEY="sk-..."
 pbrag ingest --index-path ./search-index --content-path document.txt --chunking-strategy semantic
+
+# Ingest with vector storage enabled for semantic search (requires OPENAI_API_KEY environment variable)
+export OPENAI_API_KEY="sk-..."
+pbrag ingest --index-path ./search-index --content-path document.txt --enable-vectors
 
 # Build an index from multiple files
 pbrag ingest --index-path ./search-index --content-path doc1.txt
@@ -111,6 +116,7 @@ pbrag query --index-path <index-directory> --query <search-query> [--max-results
 - `--query`: Search query text (required)
 - `--max-results`: Maximum number of results to return (optional, default: 10)
 - `--sourceIds`: Optional list of source IDs to constrain search results (optional)
+- `--search-mode`: Search mode to use: bm25, vector, or hybrid (optional, default: bm25)
 
 **Examples:**
 ```bash
@@ -125,6 +131,13 @@ pbrag query --index-path ./search-index --query "data processing" --sourceIds do
 
 # Complex multi-word query
 pbrag query --index-path ./search-index --query "how to implement dependency injection in C#"
+
+# Vector similarity search (requires OPENAI_API_KEY environment variable)
+export OPENAI_API_KEY="sk-..."
+pbrag query --index-path ./search-index --query "machine learning algorithms" --search-mode vector
+
+# Hybrid search combining BM25 and vector (requires OPENAI_API_KEY environment variable)
+pbrag query --index-path ./search-index --query "neural networks" --search-mode hybrid
 ```
 
 **Output Format:**
@@ -199,6 +212,7 @@ The server exposes a single tool called `Execute` with the following parameters:
 - **query** (required): The search query to be performed
 - **maxResults** (optional): Maximum number of results to return (default: 5)
 - **sourceIds** (optional): Array of source IDs to constrain search results to specific documents
+- **searchMode** (optional): Search mode to use: "bm25", "vector", or "hybrid" (default: "bm25")
 
 When an AI assistant uses this tool, it receives formatted search results including relevance scores, source files, paragraph numbers, and content excerpts.
 
@@ -232,47 +246,26 @@ pbrag serve --help               # Command-specific help
 - .NET 9.0
 - Lucene.NET 4.8.0 (beta)
 - ModelContextProtocol 0.3.0 (for MCP server functionality)
+- Microsoft.Extensions.VectorData.Abstractions 9.7.0 (for vector data abstractions)
+- Microsoft.SemanticKernel.Connectors.SqliteVec 1.68.0-preview (for sqlite-vec vector storage)
+- Microsoft.Extensions.AI (for embedding generation)
 
 ## Technical Details
 
 ### BM25 Similarity Search
+### Vector Similarity Search
 
-BM25 (Best Matching 25) is a probabilistic ranking function used to estimate the relevance of documents to a search query. This implementation:
+Vector similarity search complements BM25 with semantic understanding of content. This implementation:
 
-- Uses Lucene.NET's `BM25Similarity` for scoring
-- Ranks results by relevance, not just keyword matching
-- Handles term frequency and inverse document frequency
-- Provides normalized scores for result comparison
-- Supports multi-term queries with boolean logic
+- Uses OpenAI's `text-embedding-3-large` model (3072 dimensions) for generating embeddings
+- Stores embeddings in a sqlite-vec database alongside the Lucene index
+- Calculates cosine similarity between query embeddings and stored document embeddings
+- Supports three search modes: pure vector search, BM25 keyword search, or hybrid search combining both with Reciprocal Rank Fusion (RRF)
+- Requires `OPENAI_API_KEY` environment variable for embedding generation during ingest and queries
+- Embeddings are generated during content ingestion and stored persistently for efficient querying
+- Enables semantic search that understands meaning and context beyond keyword matching
 
 ### Content Chunking
-
-Content is intelligently chunked using one of three strategies. By default, chunking strategy is auto-detected based on file type, but can be explicitly specified:
-
-**Semantic Chunking (`--chunking-strategy semantic`):**
-- **Embedding-based chunking** using OpenAI's text-embedding-3-large model
-- Splits text into sentences and generates embeddings for each with buffer context
-- Calculates cosine distances between consecutive sentence embeddings
-- Identifies semantic breakpoints using percentile-based threshold detection (95th percentile default)
-- Groups sentences into chunks where semantic coherence is highest
-- **Requires OpenAI API key** (set via OPENAI_API_KEY environment variable)
-- **Embeddings are discarded after chunking** (BM25 search doesn't use them)
-- **Best for:** Complex documents where semantic boundaries don't align with structural markers
-
-**Markdown Chunking (`--chunking-strategy markdown`, auto-detected for .md files):**
-- Header-based chunking using markdown headers (# ## ### etc.)
-- Preserves document structure and hierarchy
-- Each section becomes a searchable chunk
-- Maintains context within logical document divisions
-- **Best for:** Well-structured markdown documentation
-
-**Paragraph Chunking (`--chunking-strategy paragraph`, auto-detected for .txt files):**
-- Paragraph-based chunking splitting on double newlines (`\n\n`)
-- Preserves natural paragraph boundaries
-- Suitable for prose, documentation, and unstructured text
-- Maintains readability and context in search results
-- **Best for:** Plain text documents with clear paragraph structure
-
 ### Index Structure
 
 Each indexed chunk contains the following fields:
