@@ -16,15 +16,14 @@ public class SearchSimilarityConsistencyTests : IDisposable
         var luceneRepo = new LuceneRepository();
         var vectorRepo = new VectorRepository(new MockEmbeddingService());
         var reranker = new RrfReranker();
-        var mockGenerator = new MockEmbeddingGenerator();
-        var chunker = new SemanticTextChunker(mockGenerator);
+        var chunkerFactory = new ChunkerFactory();
         var fileReaders = new List<IFileReader>
         {
             new PlainTextFileReader(),
             new MarkdownFileReader()
         };
         var fileReaderFactory = new FileReaderFactory(fileReaders);
-        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker, fileReaderFactory);
+        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker, chunkerFactory, fileReaderFactory);
         _testDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(_testDirectory);
         _indexPath = Path.Combine(_testDirectory, "similarity-test-index");

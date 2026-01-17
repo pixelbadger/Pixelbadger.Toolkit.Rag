@@ -65,25 +65,7 @@ public static class DependencyInjection
             });
 
         services.AddSingleton<IEmbeddingService, OpenAIEmbeddingService>();
-        services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
-        {
-            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-            if (string.IsNullOrEmpty(apiKey))
-                throw new InvalidOperationException("OPENAI_API_KEY environment variable is required");
-
-            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
-            var httpClient = httpClientFactory.CreateClient("OpenAI");
-            var options = new OpenAI.OpenAIClientOptions
-            {
-                Transport = new HttpClientPipelineTransport(httpClient),
-                RetryPolicy = new ClientRetryPolicy(maxRetries: 0),  // Disable built-in retries since HttpClient has retry policy
-                NetworkTimeout = Timeout.InfiniteTimeSpan  // Timeout handled by HttpClient resilience policy
-            };
-            var client = new OpenAI.OpenAIClient(new ApiKeyCredential(apiKey), options);
-            var embeddingClient = client.GetEmbeddingClient("text-embedding-3-large");
-            return embeddingClient.AsIEmbeddingGenerator();
-        });
-        services.AddTransient<ITextChunker, SemanticTextChunker>();
+        services.AddTransient<ChunkerFactory>();
         services.AddTransient<ILuceneRepository, LuceneRepository>();
         services.AddTransient<IVectorRepository, VectorRepository>();
         services.AddTransient<IReranker, RrfReranker>();
@@ -98,9 +80,9 @@ public static class DependencyInjection
             var luceneRepo = sp.GetRequiredService<ILuceneRepository>();
             var vectorRepo = sp.GetRequiredService<IVectorRepository>();
             var reranker = sp.GetRequiredService<IReranker>();
-            var chunker = sp.GetRequiredService<ITextChunker>();
+            var chunkerFactory = sp.GetRequiredService<ChunkerFactory>();
             var fileReaderFactory = sp.GetRequiredService<FileReaderFactory>();
-            return new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker, fileReaderFactory);
+            return new SearchIndexer(luceneRepo, vectorRepo, reranker, chunkerFactory, fileReaderFactory);
         });
         services.AddTransient<McpRagServer>();
         services.AddSingleton<IChatClient>(sp =>
