@@ -43,8 +43,7 @@ public interface IVectorRepository
 
 /// <summary>
 /// Vector repository backed by SQLite-vec for storing and searching chunk embeddings.
-/// Uses pre-generated embeddings from IChunk during storage.
-/// Generates embeddings for query text at search time.
+/// Generates embeddings for chunks during storage and for query text at search time.
 /// </summary>
 public class VectorRepository : IVectorRepository, IAsyncDisposable
 {
@@ -95,17 +94,20 @@ public class VectorRepository : IVectorRepository, IAsyncDisposable
     }
 
     /// <summary>
-    /// Stores chunks with their pre-generated embeddings in the vector database.
+    /// Stores chunks and generates embeddings for each chunk in the vector database.
     /// </summary>
     public async Task StoreVectorsAsync(string indexPath, string contentPath, List<IChunk> chunks)
     {
         var sourceId = Path.GetFileNameWithoutExtension(contentPath);
         var sourceFile = Path.GetFileName(contentPath);
 
-        // Create vector records using pre-generated embeddings from chunks
+        // Create vector records and generate embeddings for each chunk
         var records = new List<ChunkVectorRecord>();
         foreach (var chunk in chunks)
         {
+            // Generate embedding for this chunk's content
+            var embedding = await _embeddingService.GenerateEmbeddingAsync(chunk.Content);
+
             var record = new ChunkVectorRecord
             {
                 Key = $"{sourceId}_{chunk.ChunkNumber}",
@@ -115,7 +117,7 @@ public class VectorRepository : IVectorRepository, IAsyncDisposable
                 SourceId = sourceId,
                 ChunkNumber = chunk.ChunkNumber,
                 DocumentId = $"{sourceFile}_{chunk.ChunkNumber}",
-                Embedding = chunk.Embedding
+                Embedding = embedding
             };
             records.Add(record);
         }

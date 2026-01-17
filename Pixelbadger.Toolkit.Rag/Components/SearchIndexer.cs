@@ -16,15 +16,15 @@ public class SearchIndexer
     private readonly ILuceneRepository _luceneRepo;
     private readonly IVectorRepository _vectorRepo;
     private readonly IReranker _reranker;
-    private readonly ITextChunker _chunker;
+    private readonly ChunkerFactory _chunkerFactory;
     private readonly FileReaderFactory _fileReaderFactory;
 
-    public SearchIndexer(ILuceneRepository luceneRepo, IVectorRepository vectorRepo, IReranker reranker, ITextChunker chunker, FileReaderFactory fileReaderFactory)
+    public SearchIndexer(ILuceneRepository luceneRepo, IVectorRepository vectorRepo, IReranker reranker, ChunkerFactory chunkerFactory, FileReaderFactory fileReaderFactory)
     {
         _luceneRepo = luceneRepo;
         _vectorRepo = vectorRepo;
         _reranker = reranker;
-        _chunker = chunker;
+        _chunkerFactory = chunkerFactory;
         _fileReaderFactory = fileReaderFactory;
     }
 
@@ -173,6 +173,7 @@ public class SearchIndexer
 
     private async Task<List<IChunk>> GetChunksForFileAsync(string filePath, string content)
     {
-        return await _chunker.ChunkTextAsync(content);
+        var chunker = _chunkerFactory.GetChunker(filePath);
+        return await chunker.ChunkTextAsync(content);
     }
 }
