@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
+using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Tests;
 

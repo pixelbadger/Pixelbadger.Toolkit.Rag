@@ -1,5 +1,6 @@
 using System.CommandLine;
 using Pixelbadger.Toolkit.Rag.Components;
+using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.VectorData;
 using Microsoft.SemanticKernel.Connectors.SqliteVec;
+using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 

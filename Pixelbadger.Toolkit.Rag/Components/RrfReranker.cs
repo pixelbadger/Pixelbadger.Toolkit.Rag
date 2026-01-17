@@ -1,3 +1,5 @@
+using Pixelbadger.Toolkit.Rag.Dtos;
+
 namespace Pixelbadger.Toolkit.Rag.Components;
 
 public interface IReranker

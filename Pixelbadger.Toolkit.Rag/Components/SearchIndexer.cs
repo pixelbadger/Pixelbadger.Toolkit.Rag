@@ -7,6 +7,7 @@ using Lucene.Net.Search.Similarities;
 using Lucene.Net.Store;
 using Lucene.Net.Util;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
+using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
