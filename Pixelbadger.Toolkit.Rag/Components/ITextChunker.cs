@@ -41,24 +41,13 @@ public class SemanticTextChunker : ITextChunker
     private readonly double _thresholdAmount;
 
     public SemanticTextChunker(
-        string? apiKey = null,
+        IEmbeddingGenerator<string, Embedding<float>> embeddingGenerator,
         int tokenLimit = 512,
         int bufferSize = 1,
         BreakpointThresholdType thresholdType = BreakpointThresholdType.Percentile,
         double thresholdAmount = 95)
     {
-        // Get API key from environment if not provided
-        apiKey ??= Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        if (string.IsNullOrEmpty(apiKey))
-        {
-            throw new InvalidOperationException("OpenAI API key must be provided or set in OPENAI_API_KEY environment variable");
-        }
-
-        // Create OpenAI embedding generator using Microsoft.Extensions.AI
-        var openAIClient = new OpenAI.OpenAIClient(apiKey);
-        var embeddingClient = openAIClient.GetEmbeddingClient("text-embedding-3-large");
-        _embeddingGenerator = embeddingClient.AsIEmbeddingGenerator();
-
+        _embeddingGenerator = embeddingGenerator ?? throw new ArgumentNullException(nameof(embeddingGenerator));
         _tokenLimit = tokenLimit;
         _bufferSize = bufferSize;
         _thresholdType = thresholdType;

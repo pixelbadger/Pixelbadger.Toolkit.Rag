@@ -9,6 +9,15 @@ public static class DependencyInjection
     public static IServiceCollection AddRagServices(this IServiceCollection services)
     {
         services.AddSingleton<IEmbeddingService, OpenAIEmbeddingService>();
+        services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
+        {
+            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+            if (string.IsNullOrEmpty(apiKey))
+                throw new InvalidOperationException("OPENAI_API_KEY environment variable is required");
+            var client = new OpenAI.OpenAIClient(apiKey);
+            var embeddingClient = client.GetEmbeddingClient("text-embedding-3-large");
+            return embeddingClient.AsIEmbeddingGenerator();
+        });
         services.AddTransient<ITextChunker, SemanticTextChunker>();
         services.AddTransient<ILuceneRepository, LuceneRepository>();
         services.AddTransient<IVectorRepository, VectorRepository>();
