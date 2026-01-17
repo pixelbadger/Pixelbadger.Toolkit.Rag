@@ -12,6 +12,9 @@ public static class DependencyInjection
         services.AddTransient<ITextChunker, MarkdownTextChunker>();
         services.AddTransient<ITextChunker, ParagraphTextChunker>();
         services.AddTransient<ITextChunker, SemanticTextChunker>();
+        services.AddTransient<ILuceneRepository, LuceneRepository>();
+        services.AddTransient<IVectorRepository, VectorRepository>();
+        services.AddTransient<IReranker, RrfReranker>();
         services.AddTransient<SearchIndexer>();
         services.AddTransient<McpRagServer>();
         services.AddSingleton<IChatClient>(sp =>

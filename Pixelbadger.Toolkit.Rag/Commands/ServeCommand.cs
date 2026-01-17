@@ -6,10 +6,12 @@ namespace Pixelbadger.Toolkit.Rag.Commands;
 public class ServeCommand
 {
     private readonly SearchIndexer _indexer;
+    private readonly IEmbeddingService _embeddingService;
 
-    public ServeCommand(SearchIndexer indexer)
+    public ServeCommand(SearchIndexer indexer, IEmbeddingService embeddingService)
     {
         _indexer = indexer;
+        _embeddingService = embeddingService;
     }
 
     public Command Create()
@@ -35,7 +37,7 @@ public class ServeCommand
                     Environment.Exit(1);
                 }
 
-                var server = new McpRagServer(indexPath, _indexer);
+                var server = new McpRagServer(indexPath, _indexer, _embeddingService);
                 await server.RunAsync();
             }
             catch (Exception ex)

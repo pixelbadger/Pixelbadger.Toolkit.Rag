@@ -11,7 +11,10 @@ public class SearchIndexerTests : IDisposable
 
     public SearchIndexerTests()
     {
-        _indexer = new SearchIndexer(new MockEmbeddingService());
+        var luceneRepo = new LuceneRepository();
+        var vectorRepo = new VectorRepository(new MockEmbeddingService());
+        var reranker = new RrfReranker();
+        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker);
         _testDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(_testDirectory);
         _indexPath = Path.Combine(_testDirectory, "test-index");
@@ -50,14 +53,14 @@ public class SearchIndexerTests : IDisposable
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldReturnResults_WhenMatchingContentExists()
+    public async Task SearchAsync_ShouldReturnResults_WhenMatchingContentExists()
     {
         var contentFile = Path.Combine(_testDirectory, "content.txt");
         var content = "The quick brown fox jumps over the lazy dog.\n\nThis is a second paragraph about cats and dogs.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "fox", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "fox", SearchMode.Bm25, 10);
 
         results.Should().HaveCount(1);
         results[0].Content.Should().Be("The quick brown fox jumps over the lazy dog.");
@@ -65,44 +68,44 @@ public class SearchIndexerTests : IDisposable
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldThrowDirectoryNotFoundException_WhenIndexDoesNotExist()
+    public async Task SearchAsync_ShouldThrowDirectoryNotFoundException_WhenIndexDoesNotExist()
     {
         var nonExistentIndex = Path.Combine(_testDirectory, "nonexistent-index");
 
-        var act = async () => await _indexer.QueryAsync(nonExistentIndex, "test", 10);
+        var act = async () => await _indexer.SearchAsync(nonExistentIndex, "test", SearchMode.Bm25, 10, null);
 
         await act.Should().ThrowAsync<DirectoryNotFoundException>()
             .WithMessage($"Index directory not found: {nonExistentIndex}");
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldReturnEmptyResults_WhenNoMatchingContent()
+    public async Task SearchAsync_ShouldReturnEmptyResults_WhenNoMatchingContent()
     {
         var contentFile = Path.Combine(_testDirectory, "content.txt");
         var content = "The quick brown fox jumps over the lazy dog.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "elephant", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "elephant", SearchMode.Bm25, 10, null);
 
         results.Should().BeEmpty();
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldRespectMaxResults_WhenLimitingResults()
+    public async Task SearchAsync_ShouldRespectMaxResults_WhenLimitingResults()
     {
         var contentFile = Path.Combine(_testDirectory, "content.txt");
         var content = string.Join("\n\n", Enumerable.Repeat("This is a test paragraph about dogs.", 10));
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "dogs", 3);
+        var results = await _indexer.SearchAsync(_indexPath, "dogs", SearchMode.Bm25, 3, null);
 
         results.Should().HaveCountLessThanOrEqualTo(3);
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldFilterBySourceIds_WhenSourceIdsProvided()
+    public async Task SearchAsync_ShouldFilterBySourceIds_WhenSourceIdsProvided()
     {
         var contentFile1 = Path.Combine(_testDirectory, "content1.txt");
         var contentFile2 = Path.Combine(_testDirectory, "content2.txt");
@@ -113,7 +116,7 @@ public class SearchIndexerTests : IDisposable
         await _indexer.IngestContentAsync(_indexPath, contentFile1);
         await _indexer.IngestContentAsync(_indexPath, contentFile2);
 
-        var results = await _indexer.QueryAsync(_indexPath, "cats", 10, new[] { "content1" });
+        var results = await _indexer.SearchAsync(_indexPath, "cats", SearchMode.Bm25, 10, new[] { "content1" });
 
         results.Should().HaveCount(1);
         results.Should().OnlyContain(r => r.SourceId == "content1");
@@ -121,14 +124,14 @@ public class SearchIndexerTests : IDisposable
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldReturnCorrectMetadata_WhenResultsFound()
+    public async Task SearchAsync_ShouldReturnCorrectMetadata_WhenResultsFound()
     {
         var contentFile = Path.Combine(_testDirectory, "test-doc.txt");
         var content = "First paragraph about testing.\n\nSecond paragraph about search functionality.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "testing", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "testing", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(1);
         var result = results[0];
@@ -144,13 +147,13 @@ public class SearchIndexerTests : IDisposable
     [InlineData("quick brown fox", "fox")]
     [InlineData("lazy dog", "dog")]
     [InlineData("cats and dogs", "cats")]
-    public async Task QueryAsync_ShouldFindRelevantContent_WhenSearchingVariousTerms(string content, string searchTerm)
+    public async Task SearchAsync_ShouldFindRelevantContent_WhenSearchingVariousTerms(string content, string searchTerm)
     {
         var contentFile = Path.Combine(_testDirectory, "content.txt");
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, searchTerm, 10);
+        var results = await _indexer.SearchAsync(_indexPath, searchTerm, SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(1);
         results[0].Content.Should().Be(content);
@@ -158,7 +161,7 @@ public class SearchIndexerTests : IDisposable
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldRankBetterMatches_WhenUsingBM25Similarity()
+    public async Task SearchAsync_ShouldRankBetterMatches_WhenUsingBM25Similarity()
     {
         var contentFile = Path.Combine(_testDirectory, "content.txt");
         var content = @"Machine learning is fascinating.
@@ -171,7 +174,7 @@ Complex problems require innovative solutions.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "machine learning", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "machine learning", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCountGreaterThanOrEqualTo(2);
         results.Should().BeInDescendingOrder(r => r.Score);
@@ -190,7 +193,7 @@ Complex problems require innovative solutions.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "special", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "special", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(1);
         results[0].Content.Should().Be("This is a test with special characters: éñ@#$%^&*()!? 测试内容");
@@ -204,7 +207,7 @@ Complex problems require innovative solutions.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "paragraph", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "paragraph", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(2);
         results.Should().OnlyContain(r => !string.IsNullOrWhiteSpace(r.Content));
@@ -213,7 +216,7 @@ Complex problems require innovative solutions.";
     }
 
     [Fact]
-    public async Task QueryAsync_ShouldUseBM25Scoring_WhenMultipleTermFrequencies()
+    public async Task SearchAsync_ShouldUseBM25Scoring_WhenMultipleTermFrequencies()
     {
         var contentFile = Path.Combine(_testDirectory, "content.txt");
         var content = @"Document about cats cats cats.
@@ -224,7 +227,7 @@ Document about cats and dogs together.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "cats", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "cats", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(2);
         results.Should().BeInDescendingOrder(r => r.Score);

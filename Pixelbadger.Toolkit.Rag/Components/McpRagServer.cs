@@ -13,11 +13,11 @@ public class McpRagServer
     private static SearchIndexer _searchIndexer;
     private static IEmbeddingService _embeddingService;
 
-    public McpRagServer(string indexPath, SearchIndexer searchIndexer)
+    public McpRagServer(string indexPath, SearchIndexer searchIndexer, IEmbeddingService embeddingService)
     {
         _indexPath = indexPath;
         _searchIndexer = searchIndexer;
-        _embeddingService = searchIndexer.EmbeddingService;
+        _embeddingService = embeddingService;
     }
 
     public async Task RunAsync()

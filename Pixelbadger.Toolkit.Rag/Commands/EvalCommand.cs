@@ -86,20 +86,14 @@ public class EvalCommand
                     foreach (var mode in modes)
                     {
                         List<SearchResult> searchResults;
-                        switch (mode)
+                        var searchMode = mode switch
                         {
-                            case "bm25":
-                                searchResults = await _indexer.QueryAsync(indexPath, eval.Question, maxResults, null);
-                                break;
-                            case "vector":
-                                searchResults = await _indexer.VectorQueryAsync(indexPath, eval.Question, maxResults, null);
-                                break;
-                            case "hybrid":
-                                searchResults = await _indexer.HybridQueryAsync(indexPath, eval.Question, maxResults, null);
-                                break;
-                            default:
-                                throw new InvalidOperationException($"Unknown mode: {mode}");
-                        }
+                            "bm25" => SearchMode.Bm25,
+                            "vector" => SearchMode.Vector,
+                            "hybrid" => SearchMode.Hybrid,
+                            _ => throw new InvalidOperationException($"Unknown mode: {mode}")
+                        };
+                        searchResults = await _indexer.SearchAsync(indexPath, eval.Question, searchMode, maxResults, null);
 
                         var combinedContent = string.Join("\n\n", searchResults.Select(r => r.Content));
                         var validationPrompt = $@"
