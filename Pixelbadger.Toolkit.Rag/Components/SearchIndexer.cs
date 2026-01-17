@@ -63,7 +63,7 @@ public class SearchIndexer
     /// <param name="options">Optional ingestion options.</param>
     public async Task IngestFolderAsync(string indexPath, string folderPath, string? chunkingStrategy = null, IngestOptions? options = null)
     {
-        if (!Directory.Exists(folderPath))
+        if (!System.IO.Directory.Exists(folderPath))
         {
             throw new DirectoryNotFoundException($"Folder not found: {folderPath}");
         }
@@ -71,7 +71,7 @@ public class SearchIndexer
         options ??= new IngestOptions();
 
         // Discover all files in the folder
-        var allFiles = Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories);
+        var allFiles = System.IO.Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories);
 
         // Filter to only supported file types
         var supportedFiles = allFiles.Where(file => _fileReaderFactory.CanRead(file)).ToList();
