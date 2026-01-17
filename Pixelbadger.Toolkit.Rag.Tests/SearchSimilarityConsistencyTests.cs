@@ -11,7 +11,12 @@ public class SearchSimilarityConsistencyTests : IDisposable
 
     public SearchSimilarityConsistencyTests()
     {
-        _indexer = new SearchIndexer();
+        var luceneRepo = new LuceneRepository();
+        var vectorRepo = new VectorRepository(new MockEmbeddingService());
+        var reranker = new RrfReranker();
+        var mockGenerator = new MockEmbeddingGenerator();
+        var chunker = new SemanticChunkerTests.TestableSemanticTextChunker(mockGenerator);
+        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker);
         _testDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(_testDirectory);
         _indexPath = Path.Combine(_testDirectory, "similarity-test-index");
@@ -44,7 +49,7 @@ Final document has keyword appearing three times: keyword keyword keyword.";
         await _indexer.IngestContentAsync(_indexPath, contentFile);
 
         // Query for the keyword (should use same BM25 similarity)
-        var results = await _indexer.QueryAsync(_indexPath, "keyword", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "keyword", SearchMode.Bm25, 10, null);
 
         // Verify BM25 behavior: documents with higher term frequency should generally score higher
         // but BM25 has diminishing returns for very high frequencies
@@ -75,7 +80,7 @@ Medium length document that mentions target in reasonable context.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "target", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "target", SearchMode.Bm25, 10, null);
 
         results.Should().NotBeEmpty();
         results.Should().HaveCount(3);
@@ -109,7 +114,7 @@ Document about cats dogs and other pets.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "cats AND dogs", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "cats AND dogs", SearchMode.Bm25, 10, null);
 
         results.Should().NotBeEmpty();
 
@@ -145,7 +150,7 @@ Document with single spam occurrence.";
         await File.WriteAllTextAsync(contentFile, content);
 
         await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.QueryAsync(_indexPath, "spam", 10);
+        var results = await _indexer.SearchAsync(_indexPath, "spam", SearchMode.Bm25, 10, null);
 
         results.Should().NotBeEmpty();
         results.Should().HaveCount(3);
@@ -182,9 +187,9 @@ Another document with different content for testing.";
         await _indexer.IngestContentAsync(_indexPath, contentFile);
 
         // Run the same query multiple times
-        var results1 = await _indexer.QueryAsync(_indexPath, "testing", 10);
-        var results2 = await _indexer.QueryAsync(_indexPath, "testing", 10);
-        var results3 = await _indexer.QueryAsync(_indexPath, "testing", 10);
+        var results1 = await _indexer.SearchAsync(_indexPath, "testing", SearchMode.Bm25, 10, null);
+        var results2 = await _indexer.SearchAsync(_indexPath, "testing", SearchMode.Bm25, 10, null);
+        var results3 = await _indexer.SearchAsync(_indexPath, "testing", SearchMode.Bm25, 10, null);
 
         // Results should be identical across runs
         results1.Should().HaveCount(results2.Count);

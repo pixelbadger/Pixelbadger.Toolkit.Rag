@@ -1,4 +1,5 @@
 using Microsoft.Extensions.AI;
+using Pixelbadger.Toolkit.Rag.Components;
 
 namespace Pixelbadger.Toolkit.Rag.Tests;
 
@@ -38,34 +39,23 @@ public class MockEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<floa
 
     private static float[] GenerateDeterministicEmbedding(string text)
     {
-        // Create a 10-dimensional embedding (simplified vs real 3072-dimensional embeddings)
-        var embedding = new float[10];
+        // Create a 3072-dimensional embedding (same as OpenAI)
+        const int dimensions = 3072;
+        var embedding = new float[dimensions];
 
         if (string.IsNullOrWhiteSpace(text))
         {
             return embedding;
         }
 
-        // Dimension 0-2: Based on word count (for semantic similarity)
-        var wordCount = text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length;
-        embedding[0] = (float)wordCount / 10f;
-        embedding[1] = (float)Math.Sin(wordCount);
-        embedding[2] = (float)Math.Cos(wordCount);
+        // Generate deterministic values based on text
+        var hash = text.GetHashCode();
+        var random = new Random(hash);
 
-        // Dimension 3-5: Based on character length
-        embedding[3] = (float)text.Length / 100f;
-        embedding[4] = (float)Math.Sin(text.Length);
-        embedding[5] = (float)Math.Cos(text.Length);
-
-        // Dimension 6-7: Based on first character (for sentence variation)
-        var firstChar = char.ToLowerInvariant(text.Trim()[0]);
-        embedding[6] = (float)firstChar / 127f;
-        embedding[7] = (float)Math.Sin(firstChar);
-
-        // Dimension 8-9: Based on last character
-        var lastChar = char.ToLowerInvariant(text.Trim()[^1]);
-        embedding[8] = (float)lastChar / 127f;
-        embedding[9] = (float)Math.Cos(lastChar);
+        for (int i = 0; i < dimensions; i++)
+        {
+            embedding[i] = (float)random.NextDouble() * 2 - 1; // Random values between -1 and 1
+        }
 
         // Normalize the embedding
         var magnitude = (float)Math.Sqrt(embedding.Sum(x => x * x));
@@ -78,5 +68,32 @@ public class MockEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<floa
         }
 
         return embedding;
+    }
+}
+
+/// <summary>
+/// Mock embedding service for testing that wraps the generator
+/// </summary>
+public class MockEmbeddingService : IEmbeddingService
+{
+    private readonly IEmbeddingGenerator<string, Embedding<float>> _generator;
+
+    public int Dimensions => 3072;
+
+    public MockEmbeddingService()
+    {
+        _generator = new MockEmbeddingGenerator();
+    }
+
+    public async Task<ReadOnlyMemory<float>> GenerateEmbeddingAsync(string text, CancellationToken cancellationToken = default)
+    {
+        var result = await _generator.GenerateAsync(new[] { text }, cancellationToken: cancellationToken);
+        return result[0].Vector;
+    }
+
+    public async Task<IReadOnlyList<ReadOnlyMemory<float>>> GenerateEmbeddingsAsync(IEnumerable<string> texts, CancellationToken cancellationToken = default)
+    {
+        var result = await _generator.GenerateAsync(texts, cancellationToken: cancellationToken);
+        return result.Select(e => e.Vector).ToList();
     }
 }

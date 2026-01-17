@@ -10,11 +10,14 @@ namespace Pixelbadger.Toolkit.Rag.Components;
 public class McpRagServer
 {
     private static string _indexPath = string.Empty;
-    private static SearchIndexer _searchIndexer = new();
+    private static SearchIndexer _searchIndexer;
+    private static IEmbeddingService _embeddingService;
 
-    public McpRagServer(string indexPath)
+    public McpRagServer(string indexPath, SearchIndexer searchIndexer, IEmbeddingService embeddingService)
     {
         _indexPath = indexPath;
+        _searchIndexer = searchIndexer;
+        _embeddingService = embeddingService;
     }
 
     public async Task RunAsync()
@@ -34,11 +37,12 @@ public class McpRagServer
         await builder.Build().RunAsync();
     }
 
-    [McpServerTool, Description("Performs BM25 similarity search against a Lucene.NET index")]
+    [McpServerTool, Description("Performs search against a Lucene.NET index using BM25 keyword search, vector semantic search, or hybrid search")]
     public static async Task<object?> Execute(
         [Description("The search query to be performed.")] string query,
         [Description("Maximum number of results to return (default: 5).")] int maxResults = 5,
-        [Description("Optional array of source IDs to constrain search results to specific documents.")] string[]? sourceIds = null)
+        [Description("Optional array of source IDs to constrain search results to specific documents.")] string[]? sourceIds = null,
+        [Description("Search mode: 'bm25' (keyword), 'vector' (semantic), or 'hybrid' (combined). Default: bm25")] string searchMode = "bm25")
     {
         if (string.IsNullOrEmpty(query))
         {
@@ -50,8 +54,10 @@ public class McpRagServer
             if (!Directory.Exists(_indexPath))
                 return new { error = $"Index directory '{_indexPath}' not found." };
 
-            var results = await _searchIndexer.QueryAsync(_indexPath, query, maxResults, sourceIds);
-            return new { content = FormatSearchResults(results) };
+            var mode = ParseSearchMode(searchMode);
+
+            var results = await _searchIndexer.SearchAsync(_indexPath, query, mode, maxResults, sourceIds);
+            return new { content = FormatSearchResults(results, searchMode) };
         }
         catch (Exception ex)
         {
@@ -59,12 +65,23 @@ public class McpRagServer
         }
     }
 
-    private static string FormatSearchResults(List<SearchResult> results)
+    private static SearchMode ParseSearchMode(string mode)
+    {
+        return mode.ToLowerInvariant() switch
+        {
+            "bm25" => SearchMode.Bm25,
+            "vector" => SearchMode.Vector,
+            "hybrid" => SearchMode.Hybrid,
+            _ => SearchMode.Bm25 // Default to BM25 for unknown modes
+        };
+    }
+
+    private static string FormatSearchResults(List<SearchResult> results, string searchMode = "bm25")
     {
         if (results.Count == 0)
             return "No relevant documents found for the query.";
 
-        var response = $"Found {results.Count} relevant document(s):\n\n";
+        var response = $"Found {results.Count} relevant document(s) using {searchMode} search:\n\n";
 
         for (int i = 0; i < results.Count; i++)
         {
