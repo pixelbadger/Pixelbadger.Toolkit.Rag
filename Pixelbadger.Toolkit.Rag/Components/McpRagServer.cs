@@ -10,12 +10,14 @@ namespace Pixelbadger.Toolkit.Rag.Components;
 public class McpRagServer
 {
     private static string _indexPath = string.Empty;
-    private static SearchIndexer _searchIndexer = new();
-    private static IEmbeddingService? _embeddingService;
+    private static SearchIndexer _searchIndexer;
+    private static IEmbeddingService _embeddingService;
 
-    public McpRagServer(string indexPath)
+    public McpRagServer(string indexPath, SearchIndexer searchIndexer)
     {
         _indexPath = indexPath;
+        _searchIndexer = searchIndexer;
+        _embeddingService = searchIndexer.EmbeddingService;
     }
 
     public async Task RunAsync()
@@ -53,16 +55,6 @@ public class McpRagServer
                 return new { error = $"Index directory '{_indexPath}' not found." };
 
             var mode = ParseSearchMode(searchMode);
-
-            // Set up embedding service for vector/hybrid search
-            if (mode is SearchMode.Vector or SearchMode.Hybrid)
-            {
-                if (_embeddingService == null)
-                {
-                    _embeddingService = new OpenAIEmbeddingService();
-                }
-                _searchIndexer.SetEmbeddingService(_embeddingService);
-            }
 
             var results = await _searchIndexer.SearchAsync(_indexPath, query, mode, maxResults, sourceIds);
             return new { content = FormatSearchResults(results, searchMode) };

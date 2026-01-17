@@ -5,9 +5,16 @@ using Pixelbadger.Toolkit.Rag.Components;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
-public static class IngestCommand
+public class IngestCommand
 {
-    public static Command Create()
+    private readonly SearchIndexer _indexer;
+
+    public IngestCommand(SearchIndexer indexer)
+    {
+        _indexer = indexer;
+    }
+
+    public Command Create()
     {
         var command = new Command("ingest", "Ingest content into a search index with intelligent chunking based on file type");
 
@@ -48,17 +55,12 @@ public static class IngestCommand
         {
             try
             {
-                var indexer = new SearchIndexer();
-
-                var embeddingService = new OpenAIEmbeddingService();
-                indexer.SetEmbeddingService(embeddingService);
-
                 var options = new IngestOptions
                 {
                     EnableVectorStorage = true
                 };
 
-                await indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy, options);
+                await _indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy, options);
 
                 var strategyUsed = chunkingStrategy ?? "auto-detected";
                 Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");

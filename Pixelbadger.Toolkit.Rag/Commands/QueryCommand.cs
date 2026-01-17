@@ -3,9 +3,16 @@ using Pixelbadger.Toolkit.Rag.Components;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
-public static class QueryCommand
+public class QueryCommand
 {
-    public static Command Create()
+    private readonly SearchIndexer _indexer;
+
+    public QueryCommand(SearchIndexer indexer)
+    {
+        _indexer = indexer;
+    }
+
+    public Command Create()
     {
         var command = new Command("query", "Perform search against an index using BM25, vector, or hybrid modes");
 
@@ -57,16 +64,7 @@ public static class QueryCommand
             try
             {
                 var searchMode = ParseSearchMode(searchModeStr);
-                var indexer = new SearchIndexer();
-
-                // Set up embedding service for vector/hybrid search
-                if (searchMode is SearchMode.Vector or SearchMode.Hybrid)
-                {
-                    var embeddingService = new OpenAIEmbeddingService();
-                    indexer.SetEmbeddingService(embeddingService);
-                }
-
-                var results = await indexer.SearchAsync(indexPath, query, searchMode, maxResults, sourceIds);
+                var results = await _indexer.SearchAsync(indexPath, query, searchMode, maxResults, sourceIds);
 
                 if (results.Count == 0)
                 {

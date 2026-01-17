@@ -56,12 +56,11 @@ public class SearchIndexer
 {
     private const LuceneVersion LUCENE_VERSION = LuceneVersion.LUCENE_48;
 
-    private IEmbeddingService? _embeddingService;
+    private readonly IEmbeddingService _embeddingService;
 
-    /// <summary>
-    /// Sets the embedding service for vector operations. Required for vector storage and search.
-    /// </summary>
-    public void SetEmbeddingService(IEmbeddingService embeddingService)
+    public IEmbeddingService EmbeddingService => _embeddingService;
+
+    public SearchIndexer(IEmbeddingService embeddingService)
     {
         _embeddingService = embeddingService;
     }
@@ -90,11 +89,6 @@ public class SearchIndexer
         await IndexWithLuceneAsync(indexPath, contentPath, nonEmptyChunks);
 
         // Vector storage (always enabled for eval harness)
-        if (_embeddingService == null)
-        {
-            throw new InvalidOperationException("Embedding service is required for vector storage. Call SetEmbeddingService first.");
-        }
-
         await StoreVectorsAsync(indexPath, contentPath, nonEmptyChunks);
     }
 
@@ -240,11 +234,6 @@ public class SearchIndexer
     /// </summary>
     public async Task<List<SearchResult>> VectorQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
     {
-        if (_embeddingService == null)
-        {
-            throw new InvalidOperationException("Embedding service is required for vector search. Call SetEmbeddingService first.");
-        }
-
         var vectorStore = new VectorStore(indexPath);
         if (!vectorStore.Exists())
         {

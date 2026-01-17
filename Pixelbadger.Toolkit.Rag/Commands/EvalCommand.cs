@@ -3,11 +3,22 @@ using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Pixelbadger.Toolkit.Rag.Components;
 
+using Microsoft.Extensions.AI;
+
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
-public static class EvalCommand
+public class EvalCommand
 {
-    public static Command Create()
+    private readonly SearchIndexer _indexer;
+    private readonly IChatClient _chatClient;
+
+    public EvalCommand(SearchIndexer indexer, IChatClient chatClient)
+    {
+        _indexer = indexer;
+        _chatClient = chatClient;
+    }
+
+    public Command Create()
     {
         var command = new Command("eval", "Run evaluation queries against the index and validate responses");
 
@@ -64,19 +75,6 @@ public static class EvalCommand
 
                 modes ??= ["bm25", "vector", "hybrid"];
 
-                var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-                if (string.IsNullOrEmpty(apiKey))
-                {
-                    throw new InvalidOperationException("OPENAI_API_KEY environment variable is required for evaluation");
-                }
-
-                var openAIClient = new OpenAI.OpenAIClient(apiKey);
-                IChatClient chatClient = openAIClient.GetChatClient("gpt-4o-mini").AsIChatClient();
-
-                var indexer = new SearchIndexer();
-                var embeddingService = new OpenAIEmbeddingService();
-                indexer.SetEmbeddingService(embeddingService);
-
                 var results = new List<EvalResult>();
 
                 foreach (var eval in evals)
@@ -91,13 +89,13 @@ public static class EvalCommand
                         switch (mode)
                         {
                             case "bm25":
-                                searchResults = await indexer.QueryAsync(indexPath, eval.Question, maxResults, null);
+                                searchResults = await _indexer.QueryAsync(indexPath, eval.Question, maxResults, null);
                                 break;
                             case "vector":
-                                searchResults = await indexer.VectorQueryAsync(indexPath, eval.Question, maxResults, null);
+                                searchResults = await _indexer.VectorQueryAsync(indexPath, eval.Question, maxResults, null);
                                 break;
                             case "hybrid":
-                                searchResults = await indexer.HybridQueryAsync(indexPath, eval.Question, maxResults, null);
+                                searchResults = await _indexer.HybridQueryAsync(indexPath, eval.Question, maxResults, null);
                                 break;
                             default:
                                 throw new InvalidOperationException($"Unknown mode: {mode}");
@@ -115,7 +113,7 @@ Response: {combinedContent}
 Answer 'yes' or 'no' with a brief explanation.
 ";
 
-                        var validationResponse = await chatClient.GetResponseAsync(validationPrompt);
+                        var validationResponse = await _chatClient.GetResponseAsync(validationPrompt);
                         var validationText = validationResponse.Text ?? "";
                         var isCorrect = validationText.ToLower().Contains("yes");
 

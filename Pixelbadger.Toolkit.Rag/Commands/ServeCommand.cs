@@ -3,9 +3,16 @@ using Pixelbadger.Toolkit.Rag.Components;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
-public static class ServeCommand
+public class ServeCommand
 {
-    public static Command Create()
+    private readonly SearchIndexer _indexer;
+
+    public ServeCommand(SearchIndexer indexer)
+    {
+        _indexer = indexer;
+    }
+
+    public Command Create()
     {
         var command = new Command("serve", "Host an MCP server that performs BM25 queries against a Lucene.NET index");
 
@@ -28,7 +35,7 @@ public static class ServeCommand
                     Environment.Exit(1);
                 }
 
-                var server = new McpRagServer(indexPath);
+                var server = new McpRagServer(indexPath, _indexer);
                 await server.RunAsync();
             }
             catch (Exception ex)
