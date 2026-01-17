@@ -1,7 +1,9 @@
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Http.Resilience;
 using Pixelbadger.Toolkit.Rag.Commands;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
+using Polly;
 using System.ClientModel;
 using System.ClientModel.Primitives;
 using System.Net;
