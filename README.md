@@ -59,7 +59,7 @@ dotnet run -- [command] [options]
 
 ### ingest
 
-Ingest content files into a Lucene.NET search index with intelligent chunking.
+Ingest content files into dual search indexes (Lucene BM25 + SQLite-vec) with semantic chunking.
 
 **Usage:**
 ```bash
@@ -68,25 +68,21 @@ pbrag ingest --index-path <index-directory> --content-path <content-file>
 
 **Options:**
 - `--index-path`: Path to the Lucene.NET index directory (required)
-- `--content-path`: Path to the content file to ingest (required)
-- `--chunking-strategy`: Chunking strategy to use: `semantic`, `markdown`, or `paragraph` (optional, default: auto-detect)
-- `--enable-vectors`: Enable vector storage for semantic search (optional, default: false)
+- `--content-path`: Path to the content file or folder to ingest (required)
 
 **Examples:**
 ```bash
-# Ingest a text document (auto-detect chunking strategy)
+# Set OpenAI API key (required for semantic chunking and vector embeddings)
+export OPENAI_API_KEY="sk-..."
+
+# Ingest a single text document
 pbrag ingest --index-path ./search-index --content-path document.txt
 
-# Ingest a markdown file with explicit markdown chunking
-pbrag ingest --index-path ./search-index --content-path readme.md --chunking-strategy markdown
+# Ingest a markdown file
+pbrag ingest --index-path ./search-index --content-path readme.md
 
-# Ingest with semantic chunking (requires OPENAI_API_KEY environment variable)
-export OPENAI_API_KEY="sk-..."
-pbrag ingest --index-path ./search-index --content-path document.txt --chunking-strategy semantic
-
-# Ingest with vector storage enabled for semantic search (requires OPENAI_API_KEY environment variable)
-export OPENAI_API_KEY="sk-..."
-pbrag ingest --index-path ./search-index --content-path document.txt --enable-vectors
+# Ingest an entire folder
+pbrag ingest --index-path ./search-index --content-path ./docs-folder
 
 # Build an index from multiple files
 pbrag ingest --index-path ./search-index --content-path doc1.txt
@@ -95,12 +91,13 @@ pbrag ingest --index-path ./search-index --content-path doc3.txt
 ```
 
 **Details:**
-- Automatically detects file type and applies appropriate chunking strategy
-- Markdown files (.md): Header-based chunking preserving document structure
-- Text files (.txt): Paragraph-based chunking splitting on double newlines
+- Uses semantic chunking powered by OpenAI embeddings to create meaningful text segments
+- Supports both single files and folders (recursively processes all .txt and .md files)
+- Automatically creates dual indexes: Lucene BM25 for keyword search and SQLite-vec for semantic search
 - Creates index directory if it doesn't exist
 - Appends to existing index, allowing incremental ingestion
-- Each chunk is indexed with source file, paragraph number, and unique source ID
+- Each chunk is indexed with source file, paragraph number, unique source ID, and vector embeddings
+- Requires `OPENAI_API_KEY` environment variable for embedding generation
 
 ### query
 
