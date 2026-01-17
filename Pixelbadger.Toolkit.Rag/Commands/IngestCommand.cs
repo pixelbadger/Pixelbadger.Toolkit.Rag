@@ -27,7 +27,7 @@ public class IngestCommand
 
         var contentPathOption = new Option<string>(
             aliases: ["--content-path"],
-            description: "Path to the content file to ingest")
+            description: "Path to the content file or folder to ingest. If a folder is provided, all supported files (.txt, .md) will be ingested.")
         {
             IsRequired = true
         };
@@ -60,16 +60,33 @@ public class IngestCommand
                     EnableVectorStorage = true
                 };
 
-                await _indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy, options);
-
-                var strategyUsed = chunkingStrategy ?? "auto-detected";
-                Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");
-
-                if (evalsCount.HasValue && evalsCount.Value > 0)
+                // Check if contentPath is a directory or file
+                if (Directory.Exists(contentPath))
                 {
-                    Console.WriteLine($"Generating {evalsCount.Value} evaluation queries...");
-                    await GenerateEvaluationQueriesAsync(indexPath, contentPath, evalsCount.Value);
-                    Console.WriteLine($"Evaluation queries saved to '{Path.Combine(indexPath, "evals.json")}'");
+                    // Folder-based ingestion
+                    await _indexer.IngestFolderAsync(indexPath, contentPath, chunkingStrategy, options);
+
+                    var strategyUsed = chunkingStrategy ?? "auto-detected";
+                    Console.WriteLine($"Successfully ingested all supported files from folder '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");
+                }
+                else if (File.Exists(contentPath))
+                {
+                    // Single file ingestion (backward compatibility)
+                    await _indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy, options);
+
+                    var strategyUsed = chunkingStrategy ?? "auto-detected";
+                    Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");
+
+                    if (evalsCount.HasValue && evalsCount.Value > 0)
+                    {
+                        Console.WriteLine($"Generating {evalsCount.Value} evaluation queries...");
+                        await GenerateEvaluationQueriesAsync(indexPath, contentPath, evalsCount.Value);
+                        Console.WriteLine($"Evaluation queries saved to '{Path.Combine(indexPath, "evals.json")}'");
+                    }
+                }
+                else
+                {
+                    throw new FileNotFoundException($"Path not found: {contentPath}");
                 }
             }
             catch (Exception ex)

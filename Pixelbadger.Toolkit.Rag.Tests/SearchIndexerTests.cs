@@ -1,5 +1,6 @@
 using FluentAssertions;
 using Pixelbadger.Toolkit.Rag.Components;
+using Pixelbadger.Toolkit.Rag.Components.FileReaders;
 
 namespace Pixelbadger.Toolkit.Rag.Tests;
 
@@ -16,7 +17,13 @@ public class SearchIndexerTests : IDisposable
         var reranker = new RrfReranker();
         var mockGenerator = new MockEmbeddingGenerator();
         var chunker = new SemanticTextChunker(mockGenerator);
-        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker);
+        var fileReaders = new List<IFileReader>
+        {
+            new PlainTextFileReader(),
+            new MarkdownFileReader()
+        };
+        var fileReaderFactory = new FileReaderFactory(fileReaders);
+        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker, fileReaderFactory);
         _testDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(_testDirectory);
         _indexPath = Path.Combine(_testDirectory, "test-index");
@@ -238,5 +245,96 @@ Document about cats and dogs together.";
         var topResult = results[0];
         topResult.Content.Should().Be("Document about cats cats cats.");
         topResult.Score.Should().BeGreaterThan(results[1].Score);
+    }
+
+    [Fact]
+    public async Task IngestFolderAsync_ShouldIngestAllSupportedFiles_WhenFolderContainsMultipleFileTypes()
+    {
+        var folderPath = Path.Combine(_testDirectory, "corpus");
+        Directory.CreateDirectory(folderPath);
+
+        // Create test files
+        var txtFile1 = Path.Combine(folderPath, "document1.txt");
+        var txtFile2 = Path.Combine(folderPath, "document2.txt");
+        var mdFile = Path.Combine(folderPath, "notes.md");
+        var unsupportedFile = Path.Combine(folderPath, "data.json");
+
+        await File.WriteAllTextAsync(txtFile1, "First text document about artificial intelligence.");
+        await File.WriteAllTextAsync(txtFile2, "Second text document about machine learning.");
+        await File.WriteAllTextAsync(mdFile, "# Markdown Notes\n\nThis is a markdown document about data science.");
+        await File.WriteAllTextAsync(unsupportedFile, "{\"key\": \"value\"}");
+
+        await _indexer.IngestFolderAsync(_indexPath, folderPath);
+
+        // Verify index was created
+        Directory.Exists(_indexPath).Should().BeTrue();
+
+        // Search for content from different files
+        var aiResults = await _indexer.SearchAsync(_indexPath, "artificial intelligence", SearchMode.Bm25, 10, null);
+        var mlResults = await _indexer.SearchAsync(_indexPath, "machine learning", SearchMode.Bm25, 10, null);
+        var dsResults = await _indexer.SearchAsync(_indexPath, "data science", SearchMode.Bm25, 10, null);
+
+        // Should find content from .txt files
+        aiResults.Should().HaveCountGreaterThan(0);
+        mlResults.Should().HaveCountGreaterThan(0);
+
+        // Should find content from .md file
+        dsResults.Should().HaveCountGreaterThan(0);
+
+        // Should not find content from unsupported .json file
+        var jsonResults = await _indexer.SearchAsync(_indexPath, "key", SearchMode.Bm25, 10, null);
+        jsonResults.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task IngestFolderAsync_ShouldHandleNestedDirectories_WhenRecursiveSearchEnabled()
+    {
+        var folderPath = Path.Combine(_testDirectory, "corpus");
+        var subFolder = Path.Combine(folderPath, "subfolder");
+        Directory.CreateDirectory(subFolder);
+
+        var rootFile = Path.Combine(folderPath, "root.txt");
+        var nestedFile = Path.Combine(subFolder, "nested.txt");
+
+        await File.WriteAllTextAsync(rootFile, "Root level document about quantum computing.");
+        await File.WriteAllTextAsync(nestedFile, "Nested document about blockchain technology.");
+
+        await _indexer.IngestFolderAsync(_indexPath, folderPath);
+
+        // Should find both root and nested files
+        var quantumResults = await _indexer.SearchAsync(_indexPath, "quantum computing", SearchMode.Bm25, 10, null);
+        var blockchainResults = await _indexer.SearchAsync(_indexPath, "blockchain", SearchMode.Bm25, 10, null);
+
+        quantumResults.Should().HaveCountGreaterThan(0);
+        blockchainResults.Should().HaveCountGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task IngestFolderAsync_ShouldThrowDirectoryNotFoundException_WhenFolderDoesNotExist()
+    {
+        var nonExistentFolder = Path.Combine(_testDirectory, "nonexistent-folder");
+
+        var act = async () => await _indexer.IngestFolderAsync(_indexPath, nonExistentFolder);
+
+        await act.Should().ThrowAsync<DirectoryNotFoundException>()
+            .WithMessage($"Folder not found: {nonExistentFolder}");
+    }
+
+    [Fact]
+    public async Task IngestFolderAsync_ShouldHandleEmptyFolder_WhenNoSupportedFiles()
+    {
+        var emptyFolder = Path.Combine(_testDirectory, "empty-folder");
+        Directory.CreateDirectory(emptyFolder);
+
+        // Should not throw, just handle gracefully
+        await _indexer.IngestFolderAsync(_indexPath, emptyFolder);
+
+        // Index should not be created if no files were ingested
+        // Or if created, should be empty
+        if (Directory.Exists(_indexPath))
+        {
+            var results = await _indexer.SearchAsync(_indexPath, "anything", SearchMode.Bm25, 10, null);
+            results.Should().BeEmpty();
+        }
     }
 }

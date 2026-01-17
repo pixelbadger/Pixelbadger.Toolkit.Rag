@@ -1,6 +1,7 @@
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Pixelbadger.Toolkit.Rag.Commands;
+using Pixelbadger.Toolkit.Rag.Components.FileReaders;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
@@ -22,13 +23,20 @@ public static class DependencyInjection
         services.AddTransient<ILuceneRepository, LuceneRepository>();
         services.AddTransient<IVectorRepository, VectorRepository>();
         services.AddTransient<IReranker, RrfReranker>();
+
+        // Register file readers
+        services.AddTransient<IFileReader, PlainTextFileReader>();
+        services.AddTransient<IFileReader, MarkdownFileReader>();
+        services.AddTransient<FileReaderFactory>();
+
         services.AddTransient<SearchIndexer>((sp) =>
         {
             var luceneRepo = sp.GetRequiredService<ILuceneRepository>();
             var vectorRepo = sp.GetRequiredService<IVectorRepository>();
             var reranker = sp.GetRequiredService<IReranker>();
             var chunker = sp.GetRequiredService<ITextChunker>();
-            return new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker);
+            var fileReaderFactory = sp.GetRequiredService<FileReaderFactory>();
+            return new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker, fileReaderFactory);
         });
         services.AddTransient<McpRagServer>();
         services.AddSingleton<IChatClient>(sp =>
