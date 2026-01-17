@@ -28,12 +28,12 @@ public class SearchIndexer
         _fileReaderFactory = fileReaderFactory;
     }
 
-    public Task IngestContentAsync(string indexPath, string contentPath, string? chunkingStrategy = null)
+    public Task IngestContentAsync(string indexPath, string contentPath)
     {
-        return IngestContentAsync(indexPath, contentPath, chunkingStrategy, null);
+        return IngestContentAsync(indexPath, contentPath, null);
     }
 
-    public async Task IngestContentAsync(string indexPath, string contentPath, string? chunkingStrategy, IngestOptions? options)
+    public async Task IngestContentAsync(string indexPath, string contentPath, IngestOptions? options)
     {
         if (!File.Exists(contentPath))
         {
@@ -43,7 +43,7 @@ public class SearchIndexer
         options ??= new IngestOptions();
 
         var content = await File.ReadAllTextAsync(contentPath);
-        var chunks = await GetChunksForFileAsync(contentPath, content, chunkingStrategy);
+        var chunks = await GetChunksForFileAsync(contentPath, content);
 
         // Filter out empty chunks
         var nonEmptyChunks = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
@@ -60,9 +60,8 @@ public class SearchIndexer
     /// </summary>
     /// <param name="indexPath">Path to the Lucene index directory.</param>
     /// <param name="folderPath">Path to the folder containing files to ingest.</param>
-    /// <param name="chunkingStrategy">Optional chunking strategy (currently unused).</param>
     /// <param name="options">Optional ingestion options.</param>
-    public async Task IngestFolderAsync(string indexPath, string folderPath, string? chunkingStrategy = null, IngestOptions? options = null)
+    public async Task IngestFolderAsync(string indexPath, string folderPath, IngestOptions? options = null)
     {
         if (!System.IO.Directory.Exists(folderPath))
         {
@@ -100,7 +99,7 @@ public class SearchIndexer
                 var content = await reader.ReadTextAsync(filePath);
 
                 // Chunk the content
-                var chunks = await GetChunksForFileAsync(filePath, content, chunkingStrategy);
+                var chunks = await GetChunksForFileAsync(filePath, content);
 
                 // Filter out empty chunks
                 var nonEmptyChunks = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
@@ -172,7 +171,7 @@ public class SearchIndexer
         return _reranker.RerankResults(bm25Results, vectorResults, maxResults);
     }
 
-    private async Task<List<IChunk>> GetChunksForFileAsync(string filePath, string content, string? chunkingStrategy = null)
+    private async Task<List<IChunk>> GetChunksForFileAsync(string filePath, string content)
     {
         return await _chunker.ChunkTextAsync(content);
     }

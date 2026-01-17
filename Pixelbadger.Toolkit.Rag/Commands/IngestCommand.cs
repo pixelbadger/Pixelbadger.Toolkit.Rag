@@ -34,13 +34,6 @@ public class IngestCommand
             IsRequired = true
         };
 
-        var chunkingStrategyOption = new Option<string?>(
-            aliases: ["--chunking-strategy"],
-            description: "Chunking strategy: 'semantic', 'markdown', or 'paragraph' (default: auto-detect based on file extension)")
-        {
-            IsRequired = false
-        };
-
         var evalsOption = new Option<int?>(
             aliases: ["--evals"],
             description: "Generate evaluation queries after ingestion (requires OPENAI_API_KEY). Number specifies how many query/answer pairs to generate.")
@@ -50,10 +43,9 @@ public class IngestCommand
 
         command.AddOption(indexPathOption);
         command.AddOption(contentPathOption);
-        command.AddOption(chunkingStrategyOption);
         command.AddOption(evalsOption);
 
-        command.SetHandler(async (string indexPath, string contentPath, string? chunkingStrategy, int? evalsCount) =>
+        command.SetHandler(async (string indexPath, string contentPath, int? evalsCount) =>
         {
             try
             {
@@ -66,18 +58,16 @@ public class IngestCommand
                 if (Directory.Exists(contentPath))
                 {
                     // Folder-based ingestion
-                    await _indexer.IngestFolderAsync(indexPath, contentPath, chunkingStrategy, options);
+                    await _indexer.IngestFolderAsync(indexPath, contentPath, options);
 
-                    var strategyUsed = chunkingStrategy ?? "auto-detected";
-                    Console.WriteLine($"Successfully ingested all supported files from folder '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");
+                    Console.WriteLine($"Successfully ingested all supported files from folder '{contentPath}' into index at '{indexPath}' using semantic chunking with vector embeddings");
                 }
                 else if (File.Exists(contentPath))
                 {
                     // Single file ingestion (backward compatibility)
-                    await _indexer.IngestContentAsync(indexPath, contentPath, chunkingStrategy, options);
+                    await _indexer.IngestContentAsync(indexPath, contentPath, options);
 
-                    var strategyUsed = chunkingStrategy ?? "auto-detected";
-                    Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {strategyUsed} chunking with vector embeddings");
+                    Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using semantic chunking with vector embeddings");
 
                     if (evalsCount.HasValue && evalsCount.Value > 0)
                     {
@@ -100,7 +90,7 @@ public class IngestCommand
                 Console.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, indexPathOption, contentPathOption, chunkingStrategyOption, evalsOption);
+        }, indexPathOption, contentPathOption, evalsOption);
 
         return command;
     }
