@@ -1,6 +1,6 @@
 # Pixelbadger.Toolkit.Rag
 
-A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 and vector similarity search indexing, querying, semantic chunking, and MCP server functionality powered by Lucene.NET and sqlite-vec.
+A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 and vector similarity search indexing, querying, content-aware chunking (paragraph and markdown), and MCP server functionality powered by Lucene.NET and sqlite-vec.
 
 ## Table of Contents
 
@@ -59,7 +59,7 @@ dotnet run -- [command] [options]
 
 ### ingest
 
-Ingest content files into a Lucene.NET search index with intelligent chunking.
+Ingest content files into dual search indexes (Lucene BM25 + SQLite-vec) with content-aware chunking.
 
 **Usage:**
 ```bash
@@ -68,25 +68,21 @@ pbrag ingest --index-path <index-directory> --content-path <content-file>
 
 **Options:**
 - `--index-path`: Path to the Lucene.NET index directory (required)
-- `--content-path`: Path to the content file to ingest (required)
-- `--chunking-strategy`: Chunking strategy to use: `semantic`, `markdown`, or `paragraph` (optional, default: auto-detect)
-- `--enable-vectors`: Enable vector storage for semantic search (optional, default: false)
+- `--content-path`: Path to the content file or folder to ingest (required)
 
 **Examples:**
 ```bash
-# Ingest a text document (auto-detect chunking strategy)
+# Set OpenAI API key (required for vector embeddings)
+export OPENAI_API_KEY="sk-..."
+
+# Ingest a single text document (uses paragraph chunking)
 pbrag ingest --index-path ./search-index --content-path document.txt
 
-# Ingest a markdown file with explicit markdown chunking
-pbrag ingest --index-path ./search-index --content-path readme.md --chunking-strategy markdown
+# Ingest a markdown file (uses header-based chunking)
+pbrag ingest --index-path ./search-index --content-path readme.md
 
-# Ingest with semantic chunking (requires OPENAI_API_KEY environment variable)
-export OPENAI_API_KEY="sk-..."
-pbrag ingest --index-path ./search-index --content-path document.txt --chunking-strategy semantic
-
-# Ingest with vector storage enabled for semantic search (requires OPENAI_API_KEY environment variable)
-export OPENAI_API_KEY="sk-..."
-pbrag ingest --index-path ./search-index --content-path document.txt --enable-vectors
+# Ingest an entire folder
+pbrag ingest --index-path ./search-index --content-path ./docs-folder
 
 # Build an index from multiple files
 pbrag ingest --index-path ./search-index --content-path doc1.txt
@@ -95,12 +91,13 @@ pbrag ingest --index-path ./search-index --content-path doc3.txt
 ```
 
 **Details:**
-- Automatically detects file type and applies appropriate chunking strategy
-- Markdown files (.md): Header-based chunking preserving document structure
-- Text files (.txt): Paragraph-based chunking splitting on double newlines
+- Uses content-aware chunking: paragraphs for .txt files, headers for .md files
+- Supports both single files and folders (recursively processes all .txt and .md files)
+- Automatically creates dual indexes: Lucene BM25 for keyword search and SQLite-vec for semantic search
 - Creates index directory if it doesn't exist
 - Appends to existing index, allowing incremental ingestion
-- Each chunk is indexed with source file, paragraph number, and unique source ID
+- Each chunk is indexed with source file, chunk number, unique source ID, and vector embeddings
+- Requires `OPENAI_API_KEY` environment variable for vector embedding generation
 
 ### query
 
@@ -266,6 +263,34 @@ Vector similarity search complements BM25 with semantic understanding of content
 - Enables semantic search that understands meaning and context beyond keyword matching
 
 ### Content Chunking
+
+The system uses content-aware chunking strategies tailored to each file type:
+
+**Paragraph Chunking (.txt files)**
+- Splits text on double newlines (`\n\n`, `\r\n\r\n`) to identify paragraph boundaries
+- Falls back to single newlines if no double newlines are found
+- Filters out empty or whitespace-only paragraphs
+- Preserves the natural document structure without breaking mid-thought
+- Each chunk receives a sequential chunk number
+
+**Markdown Chunking (.md files)**
+- Splits markdown documents by headers (H1-H6: `#` to `######`)
+- Each chunk includes the header line and all content until the next header
+- Preserves header hierarchy and context
+- Handles content before the first header as a separate chunk
+- Ideal for documentation where headers denote topic boundaries
+
+**ChunkerFactory**
+- Automatically selects the appropriate chunker based on file extension
+- `.md` files → `MarkdownTextChunker`
+- All other files (including `.txt`) → `ParagraphTextChunker`
+
+**Benefits**
+- Respects natural document structure instead of arbitrary token limits
+- Preserves semantic coherence within chunks
+- Simple, deterministic, and fast (no ML model required for chunking)
+- Embeddings are generated during storage, not during chunking
+
 ### Index Structure
 
 Each indexed chunk contains the following fields:
