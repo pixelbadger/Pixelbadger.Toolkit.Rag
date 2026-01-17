@@ -64,7 +64,25 @@ public static class DependencyInjection
                 options.TotalRequestTimeout.Timeout = TimeSpan.FromMinutes(2);
             });
 
-        services.AddSingleton<IEmbeddingService, OpenAIEmbeddingService>();
+        services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(sp =>
+        {
+            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
+            if (string.IsNullOrEmpty(apiKey))
+                throw new InvalidOperationException("OPENAI_API_KEY environment variable is required");
+
+            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
+            var httpClient = httpClientFactory.CreateClient("OpenAI");
+            var options = new OpenAI.OpenAIClientOptions
+            {
+                Transport = new HttpClientPipelineTransport(httpClient),
+                RetryPolicy = new ClientRetryPolicy(maxRetries: 0),  // Disable built-in retries since HttpClient has retry policy
+                NetworkTimeout = Timeout.InfiniteTimeSpan  // Timeout handled by HttpClient resilience policy
+            };
+            var client = new OpenAI.OpenAIClient(new ApiKeyCredential(apiKey), options);
+            var embeddingClient = client.GetEmbeddingClient("text-embedding-3-large");
+            return embeddingClient.AsIEmbeddingGenerator();
+        });
+        services.AddSingleton<IEmbeddingService>(sp => new OpenAIEmbeddingService(sp.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>()));
         services.AddTransient<ChunkerFactory>();
         services.AddTransient<ILuceneRepository, LuceneRepository>();
         services.AddTransient<IVectorRepository, VectorRepository>();
