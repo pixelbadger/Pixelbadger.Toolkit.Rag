@@ -1,6 +1,6 @@
 # Pixelbadger.Toolkit.Rag
 
-A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 and vector similarity search indexing, querying, semantic chunking, and MCP server functionality powered by Lucene.NET and sqlite-vec.
+A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 and vector similarity search indexing, querying, content-aware chunking (paragraph and markdown), and MCP server functionality powered by Lucene.NET and sqlite-vec.
 
 ## Table of Contents
 
@@ -59,7 +59,7 @@ dotnet run -- [command] [options]
 
 ### ingest
 
-Ingest content files into dual search indexes (Lucene BM25 + SQLite-vec) with semantic chunking.
+Ingest content files into dual search indexes (Lucene BM25 + SQLite-vec) with content-aware chunking.
 
 **Usage:**
 ```bash
@@ -72,13 +72,13 @@ pbrag ingest --index-path <index-directory> --content-path <content-file>
 
 **Examples:**
 ```bash
-# Set OpenAI API key (required for semantic chunking and vector embeddings)
+# Set OpenAI API key (required for vector embeddings)
 export OPENAI_API_KEY="sk-..."
 
-# Ingest a single text document
+# Ingest a single text document (uses paragraph chunking)
 pbrag ingest --index-path ./search-index --content-path document.txt
 
-# Ingest a markdown file
+# Ingest a markdown file (uses header-based chunking)
 pbrag ingest --index-path ./search-index --content-path readme.md
 
 # Ingest an entire folder
@@ -91,13 +91,13 @@ pbrag ingest --index-path ./search-index --content-path doc3.txt
 ```
 
 **Details:**
-- Uses semantic chunking powered by OpenAI embeddings to create meaningful text segments
+- Uses content-aware chunking: paragraphs for .txt files, headers for .md files
 - Supports both single files and folders (recursively processes all .txt and .md files)
 - Automatically creates dual indexes: Lucene BM25 for keyword search and SQLite-vec for semantic search
 - Creates index directory if it doesn't exist
 - Appends to existing index, allowing incremental ingestion
-- Each chunk is indexed with source file, paragraph number, unique source ID, and vector embeddings
-- Requires `OPENAI_API_KEY` environment variable for embedding generation
+- Each chunk is indexed with source file, chunk number, unique source ID, and vector embeddings
+- Requires `OPENAI_API_KEY` environment variable for vector embedding generation
 
 ### query
 
@@ -253,7 +253,7 @@ This section provides a detailed overview of the document ingestion and search p
 
 ### Document Ingestion Pipeline
 
-The ingestion pipeline processes documents through four main phases: file reading, text chunking, embedding generation, and dual-index storage.
+The ingestion pipeline processes documents through four main phases: file reading, content-aware chunking, dual-index storage, and embedding generation.
 
 ```mermaid
 flowchart TD
@@ -262,25 +262,28 @@ flowchart TD
     FileReader --> |Routes by extension| PlainText[PlainTextFileReader<br/>.txt files]
     FileReader --> |Routes by extension| Markdown[MarkdownFileReader<br/>.md files]
 
-    PlainText --> RawText[Raw Text Content]
-    Markdown --> RawText
+    PlainText --> RawTextTxt[Raw Text Content<br/>.txt]
+    Markdown --> RawTextMd[Raw Text Content<br/>.md]
 
-    RawText --> Chunker[Phase 2: Text Chunking<br/>SemanticTextChunker]
+    RawTextTxt --> ChunkerFactory{ChunkerFactory<br/>Select by extension}
+    RawTextMd --> ChunkerFactory
 
-    Chunker --> |Uses embeddings for<br/>semantic boundaries| ChunkGen[Generate Chunks<br/>Token limit: 512<br/>Buffer size: 1<br/>Threshold: 95th percentile]
+    ChunkerFactory --> |.txt files| ParaChunker[ParagraphTextChunker<br/>Split by paragraphs]
+    ChunkerFactory --> |.md files| MdChunker[MarkdownTextChunker<br/>Split by headers H1-H6]
 
-    ChunkGen --> Embedding[Phase 3: Embedding Generation<br/>OpenAI text-embedding-3-large<br/>3072 dimensions]
+    ParaChunker --> |Paragraph boundaries| Chunks[Phase 2: Text Chunks<br/>IChunk objects]
+    MdChunker --> |Header sections| Chunks
 
-    Embedding --> Chunks[Chunks with Embeddings<br/>IChunk objects]
+    Chunks --> Storage[Phase 3: Dual-Index Storage]
 
-    Chunks --> Storage[Phase 4: Dual-Index Storage]
-
-    Storage --> Lucene[Lucene BM25 Index<br/>LuceneRepository]
-    Storage --> Vector[SQLite-vec Database<br/>VectorRepository]
+    Storage --> Lucene[Lucene BM25 Index<br/>LuceneRepository<br/>Stores chunks]
+    Storage --> Vector[SQLite-vec Database<br/>VectorRepository<br/>Generates + stores embeddings]
 
     Lucene --> |Stores| LuceneFields[Fields:<br/>- content<br/>- source_file<br/>- source_path<br/>- source_id<br/>- paragraph_number<br/>- document_id]
 
-    Vector --> |Stores| VectorFields[ChunkVectorRecord:<br/>- Key<br/>- Content<br/>- Metadata fields<br/>- Embedding vector]
+    Vector --> |Phase 4: Per-chunk| EmbedGen[Embedding Generation<br/>OpenAI text-embedding-3-large<br/>3072 dimensions]
+
+    EmbedGen --> VectorFields[ChunkVectorRecord:<br/>- Key<br/>- Content<br/>- Metadata fields<br/>- Embedding vector]
 
     LuceneFields --> Complete([Indexed Content<br/>Ready for Search])
     VectorFields --> Complete
@@ -289,8 +292,8 @@ flowchart TD
     style Complete fill:#d4edda
     style Lucene fill:#fff3cd
     style Vector fill:#fff3cd
-    style Chunker fill:#f8d7da
-    style Embedding fill:#f8d7da
+    style ChunkerFactory fill:#f8d7da
+    style EmbedGen fill:#d1ecf1
 ```
 
 #### Ingestion Pipeline Phases
@@ -304,31 +307,24 @@ flowchart TD
   - Extracts raw text content from files
   - Supports both single file and folder-based batch ingestion
 
-**Phase 2: Text Chunking**
-- **Component**: `SemanticTextChunker` implementing `ITextChunker`
-- **Location**: `Pixelbadger.Toolkit.Rag/Components/ITextChunker.cs`
-- **Configuration**:
-  - Token limit: 512 tokens (default)
-  - Buffer size: 1
-  - Threshold type: Percentile
-  - Threshold amount: 95th percentile
+**Phase 2: Content-Aware Chunking**
+- **Component**: `ChunkerFactory` with `ParagraphTextChunker` and `MarkdownTextChunker`
+- **Location**: `Pixelbadger.Toolkit.Rag/Components/`
 - **Process**:
-  - Takes raw text content as input
-  - Uses embedding generator to understand semantic boundaries between sentences
-  - Creates chunks based on semantic similarity rather than fixed sizes
-  - Each sentence is compared to its neighbors to identify natural break points
-  - Produces optimal chunks that preserve semantic coherence
+  - ChunkerFactory selects chunker based on file extension
+  - **For .txt files**: `ParagraphTextChunker`
+    - Splits on double newlines (paragraph boundaries)
+    - Falls back to single newlines if no paragraphs detected
+    - Preserves natural document structure
+  - **For .md files**: `MarkdownTextChunker`
+    - Uses `MarkdownChunker` to split by headers (H1-H6)
+    - Preserves header hierarchy and context
+    - Each chunk includes the header and its content
+    - Handles content before first header appropriately
+  - Produces `IChunk` objects with content and chunk numbers
+  - No embedding generation at this stage (deferred to storage phase)
 
-**Phase 3: Embedding Generation**
-- **Component**: `OpenAIEmbeddingService` with `text-embedding-3-large` model
-- **Dimensions**: 3072-dimensional vectors
-- **Process**:
-  - Generates embeddings for each chunk during the chunking process
-  - Embeddings are pre-computed and stored with chunks
-  - No re-embedding required during storage or search
-  - Requires `OPENAI_API_KEY` environment variable
-
-**Phase 4: Dual-Index Storage**
+**Phase 3: Dual-Index Storage**
 - **Components**:
   - `LuceneRepository` for BM25 keyword search
   - `VectorRepository` for semantic vector search
@@ -338,7 +334,8 @@ flowchart TD
 - **Process**:
   - Both indexing operations run sequentially
   - Filters out empty chunks before storage
-  - Uses pre-generated embeddings (no re-computation)
+  - Lucene stores chunks directly (no embeddings needed)
+  - VectorRepository generates embeddings during storage (Phase 4)
   - Each chunk is stored in both indexes with consistent metadata
 - **Lucene Fields**:
   - `content`: Full text content (searchable, stored)
@@ -347,13 +344,23 @@ flowchart TD
   - `source_id`: Unique source identifier
   - `paragraph_number`: Chunk sequence number
   - `document_id`: Unique document identifier
+
+**Phase 4: Embedding Generation (During Vector Storage)**
+- **Component**: `OpenAIEmbeddingService` with `text-embedding-3-large` model
+- **Location**: `VectorRepository.StoreVectorsAsync()`
+- **Dimensions**: 3072-dimensional vectors
+- **Process**:
+  - For each chunk being stored, generates embedding on-demand
+  - Uses `IEmbeddingService.GenerateEmbeddingAsync()` per chunk
+  - Embeddings are computed during storage, not during chunking
+  - Requires `OPENAI_API_KEY` environment variable
 - **Vector Record Structure**:
   - Key: Unique identifier
   - Content: Chunk text
   - Source metadata (file, path, id)
   - ChunkNumber: Sequence number
   - DocumentId: Unique document identifier
-  - Embedding: 3072-dimension vector
+  - Embedding: 3072-dimension vector (generated during storage)
 
 **Orchestrator**: `SearchIndexer.IngestContentAsync()` and `SearchIndexer.IngestFolderAsync()`
 
@@ -501,6 +508,39 @@ Vector similarity search complements BM25 with semantic understanding of content
 - Enables semantic search that understands meaning and context beyond keyword matching
 
 ### Content Chunking
+
+The system uses content-aware chunking strategies tailored to each file type:
+
+**Paragraph Chunking (.txt files)**
+- Implemented by `ParagraphChunker` and `ParagraphTextChunker`
+- Splits text on double newlines (`\n\n`, `\r\n\r\n`) to identify paragraph boundaries
+- Falls back to single newlines if no double newlines are found
+- Filters out empty or whitespace-only paragraphs
+- Preserves the natural document structure without breaking mid-thought
+- Each chunk receives a sequential chunk number
+
+**Markdown Chunking (.md files)**
+- Implemented by `MarkdownChunker` and `MarkdownTextChunker`
+- Splits markdown documents by headers (H1-H6: `#` to `######`)
+- Each chunk includes the header line and all content until the next header
+- Preserves header hierarchy and context
+- Handles content before the first header as a separate chunk
+- Captures header text, header level, and line number metadata
+- Ideal for documentation where headers denote topic boundaries
+
+**ChunkerFactory**
+- Automatically selects the appropriate chunker based on file extension
+- `.md` files → `MarkdownTextChunker`
+- All other files (including `.txt`) → `ParagraphTextChunker`
+- Future file types (PDF, DOCX, etc.) will be converted to markdown and use the markdown chunker
+
+**Benefits of Content-Aware Chunking**
+- Respects natural document structure instead of arbitrary token limits
+- Preserves semantic coherence within chunks
+- Markdown chunking maintains topic boundaries via headers
+- Simple, deterministic, and fast (no ML model required for chunking)
+- Embeddings are generated once during storage, not during chunking
+
 ### Index Structure
 
 Each indexed chunk contains the following fields:
