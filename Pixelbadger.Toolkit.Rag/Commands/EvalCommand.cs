@@ -1,21 +1,18 @@
 using System.CommandLine;
 using System.Text.Json;
-using Microsoft.Extensions.AI;
 using Pixelbadger.Toolkit.Rag.Components;
-
-using Microsoft.Extensions.AI;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
 public class EvalCommand
 {
     private readonly SearchIndexer _indexer;
-    private readonly IChatClient _chatClient;
+    private readonly EvalValidator _evalValidator;
 
-    public EvalCommand(SearchIndexer indexer, IChatClient chatClient)
+    public EvalCommand(SearchIndexer indexer, EvalValidator evalValidator)
     {
         _indexer = indexer;
-        _chatClient = chatClient;
+        _evalValidator = evalValidator;
     }
 
     public Command Create()
@@ -96,25 +93,16 @@ public class EvalCommand
                         searchResults = await _indexer.SearchAsync(indexPath, eval.Question, searchMode, maxResults, null);
 
                         var combinedContent = string.Join("\n\n", searchResults.Select(r => r.Content));
-                        var validationPrompt = $@"
-Does the following response correctly answer the question?
 
-Question: {eval.Question}
-Expected Answer: {eval.ExpectedAnswer}
-
-Response: {combinedContent}
-
-Answer 'yes' or 'no' with a brief explanation.
-";
-
-                        var validationResponse = await _chatClient.GetResponseAsync(validationPrompt);
-                        var validationText = validationResponse.Text ?? "";
-                        var isCorrect = validationText.ToLower().Contains("yes");
+                        var (isCorrect, explanation) = await _evalValidator.ValidateAsync(
+                            eval.Question,
+                            eval.ExpectedAnswer,
+                            combinedContent);
 
                         evalResult.ModeResults[mode] = new ModeResult
                         {
                             IsCorrect = isCorrect,
-                            Explanation = validationText,
+                            Explanation = explanation,
                             RetrievedContent = combinedContent
                         };
 
@@ -152,21 +140,5 @@ Answer 'yes' or 'no' with a brief explanation.
         }, indexPathOption, evalsPathOption, modesOption, maxResultsOption);
 
         return command;
-    }
-
-    private record EvalPair(string Question, string ExpectedAnswer);
-
-    private record EvalResult
-    {
-        public string Question { get; init; } = "";
-        public string ExpectedAnswer { get; init; } = "";
-        public Dictionary<string, ModeResult> ModeResults { get; } = new();
-    }
-
-    private record ModeResult
-    {
-        public bool IsCorrect { get; init; }
-        public string Explanation { get; init; } = "";
-        public string RetrievedContent { get; init; } = "";
     }
 }

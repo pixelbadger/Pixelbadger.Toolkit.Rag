@@ -48,6 +48,10 @@ public static class DependencyInjection
             return client.GetChatClient("gpt-4o-mini").AsIChatClient();
         });
 
+        // Register evaluation components
+        services.AddTransient<EvalGenerator>();
+        services.AddTransient<EvalValidator>();
+
         services.AddTransient<QueryCommand>();
         services.AddTransient<IngestCommand>();
         services.AddTransient<EvalCommand>();

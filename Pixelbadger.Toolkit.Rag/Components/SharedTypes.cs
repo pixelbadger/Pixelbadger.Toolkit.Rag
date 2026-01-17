@@ -42,3 +42,28 @@ public enum SearchMode
     /// </summary>
     Hybrid
 }
+
+/// <summary>
+/// Represents an evaluation question-answer pair.
+/// </summary>
+public record EvalPair(string Question, string ExpectedAnswer);
+
+/// <summary>
+/// Represents the result of evaluating a question across different search modes.
+/// </summary>
+public record EvalResult
+{
+    public string Question { get; init; } = "";
+    public string ExpectedAnswer { get; init; } = "";
+    public Dictionary<string, ModeResult> ModeResults { get; } = new();
+}
+
+/// <summary>
+/// Represents the validation result for a specific search mode.
+/// </summary>
+public record ModeResult
+{
+    public bool IsCorrect { get; init; }
+    public string Explanation { get; init; } = "";
+    public string RetrievedContent { get; init; } = "";
+}
