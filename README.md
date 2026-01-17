@@ -250,6 +250,244 @@ pbrag serve --help               # Command-specific help
 - Microsoft.SemanticKernel.Connectors.SqliteVec 1.68.0-preview (for sqlite-vec vector storage)
 - Microsoft.Extensions.AI (for embedding generation)
 
+## Architecture Overview
+
+This section provides a detailed overview of the document ingestion and search pipelines, illustrating how documents flow through the system from raw files to searchable indexed content, and how queries are processed to retrieve relevant results.
+
+### Document Ingestion Pipeline
+
+The ingestion pipeline processes documents through four main phases: file reading, text chunking, embedding generation, and dual-index storage.
+
+```mermaid
+flowchart TD
+    Start([Document Files]) --> FileReader[Phase 1: File Reading<br/>FileReaderFactory]
+
+    FileReader --> |Routes by extension| PlainText[PlainTextFileReader<br/>.txt files]
+    FileReader --> |Routes by extension| Markdown[MarkdownFileReader<br/>.md files]
+
+    PlainText --> RawText[Raw Text Content]
+    Markdown --> RawText
+
+    RawText --> Chunker[Phase 2: Text Chunking<br/>SemanticTextChunker]
+
+    Chunker --> |Uses embeddings for<br/>semantic boundaries| ChunkGen[Generate Chunks<br/>Token limit: 512<br/>Buffer size: 1<br/>Threshold: 95th percentile]
+
+    ChunkGen --> Embedding[Phase 3: Embedding Generation<br/>OpenAI text-embedding-3-large<br/>3072 dimensions]
+
+    Embedding --> Chunks[Chunks with Embeddings<br/>IChunk objects]
+
+    Chunks --> Storage[Phase 4: Dual-Index Storage]
+
+    Storage --> Lucene[Lucene BM25 Index<br/>LuceneRepository]
+    Storage --> Vector[SQLite-vec Database<br/>VectorRepository]
+
+    Lucene --> |Stores| LuceneFields[Fields:<br/>- content<br/>- source_file<br/>- source_path<br/>- source_id<br/>- paragraph_number<br/>- document_id]
+
+    Vector --> |Stores| VectorFields[ChunkVectorRecord:<br/>- Key<br/>- Content<br/>- Metadata fields<br/>- Embedding vector]
+
+    LuceneFields --> Complete([Indexed Content<br/>Ready for Search])
+    VectorFields --> Complete
+
+    style Start fill:#e1f5ff
+    style Complete fill:#d4edda
+    style Lucene fill:#fff3cd
+    style Vector fill:#fff3cd
+    style Chunker fill:#f8d7da
+    style Embedding fill:#f8d7da
+```
+
+#### Ingestion Pipeline Phases
+
+**Phase 1: File Reading**
+- **Component**: `FileReaderFactory` with `IFileReader` implementations
+- **Location**: `Pixelbadger.Toolkit.Rag/Components/FileReaders/`
+- **Process**:
+  - FileReaderFactory identifies file type by extension
+  - Routes files to appropriate reader (PlainTextFileReader for `.txt`, MarkdownFileReader for `.md`)
+  - Extracts raw text content from files
+  - Supports both single file and folder-based batch ingestion
+
+**Phase 2: Text Chunking**
+- **Component**: `SemanticTextChunker` implementing `ITextChunker`
+- **Location**: `Pixelbadger.Toolkit.Rag/Components/ITextChunker.cs`
+- **Configuration**:
+  - Token limit: 512 tokens (default)
+  - Buffer size: 1
+  - Threshold type: Percentile
+  - Threshold amount: 95th percentile
+- **Process**:
+  - Takes raw text content as input
+  - Uses embedding generator to understand semantic boundaries between sentences
+  - Creates chunks based on semantic similarity rather than fixed sizes
+  - Each sentence is compared to its neighbors to identify natural break points
+  - Produces optimal chunks that preserve semantic coherence
+
+**Phase 3: Embedding Generation**
+- **Component**: `OpenAIEmbeddingService` with `text-embedding-3-large` model
+- **Dimensions**: 3072-dimensional vectors
+- **Process**:
+  - Generates embeddings for each chunk during the chunking process
+  - Embeddings are pre-computed and stored with chunks
+  - No re-embedding required during storage or search
+  - Requires `OPENAI_API_KEY` environment variable
+
+**Phase 4: Dual-Index Storage**
+- **Components**:
+  - `LuceneRepository` for BM25 keyword search
+  - `VectorRepository` for semantic vector search
+- **Storage Locations**:
+  - Lucene: `{index-path}/` (FSDirectory structure)
+  - Vectors: `{index-path}/vectors.db` (SQLite database)
+- **Process**:
+  - Both indexing operations run sequentially
+  - Filters out empty chunks before storage
+  - Uses pre-generated embeddings (no re-computation)
+  - Each chunk is stored in both indexes with consistent metadata
+- **Lucene Fields**:
+  - `content`: Full text content (searchable, stored)
+  - `source_file`: Original filename
+  - `source_path`: Full file path
+  - `source_id`: Unique source identifier
+  - `paragraph_number`: Chunk sequence number
+  - `document_id`: Unique document identifier
+- **Vector Record Structure**:
+  - Key: Unique identifier
+  - Content: Chunk text
+  - Source metadata (file, path, id)
+  - ChunkNumber: Sequence number
+  - DocumentId: Unique document identifier
+  - Embedding: 3072-dimension vector
+
+**Orchestrator**: `SearchIndexer.IngestContentAsync()` and `SearchIndexer.IngestFolderAsync()`
+
+### Search and Retrieval Pipeline
+
+The retrieval pipeline supports three search modes: BM25 keyword search, vector semantic search, and hybrid search combining both strategies with Reciprocal Rank Fusion (RRF).
+
+```mermaid
+flowchart TD
+    Query([Query Text]) --> ModeSwitch{Search Mode?}
+
+    ModeSwitch --> |BM25| BM25Path[BM25 Search Path]
+    ModeSwitch --> |Vector| VectorPath[Vector Search Path]
+    ModeSwitch --> |Hybrid| HybridPath[Hybrid Search Path]
+
+    BM25Path --> QueryParser[Phase 1a: Query Parsing<br/>StandardAnalyzer<br/>QueryParser]
+    QueryParser --> LuceneSearch[Phase 2a: Lucene Search<br/>BM25Similarity scoring]
+    LuceneSearch --> |Optional filter| SourceFilter1[Filter by source_id<br/>BooleanQuery]
+    SourceFilter1 --> BM25Results[BM25 Scored Results]
+
+    VectorPath --> EmbedQuery[Phase 1b: Query Embedding<br/>IEmbeddingService<br/>text-embedding-3-large]
+    EmbedQuery --> VectorSearch[Phase 2b: Vector Search<br/>Euclidean distance<br/>SQLite-vec]
+    VectorSearch --> |Convert| CosineSim[Convert to Cosine Similarity<br/>1.0 - distance² / 2.0]
+    CosineSim --> |Optional filter| SourceFilter2[Filter by source_id<br/>VectorSearchOptions]
+    SourceFilter2 --> VectorResults[Vector Scored Results]
+
+    HybridPath --> ParallelSplit[Execute Both Searches<br/>in Parallel]
+    ParallelSplit --> BM25Branch[BM25 Search<br/>Fetch 2x max results<br/>minimum 20]
+    ParallelSplit --> VectorBranch[Vector Search<br/>Fetch 2x max results<br/>minimum 20]
+
+    BM25Branch --> RRF[Phase 3: Reciprocal Rank Fusion<br/>RrfReranker]
+    VectorBranch --> RRF
+
+    RRF --> |k = 60| RRFCalc[RRF Score Calculation<br/>Σ 1 / k + rank<br/>for each result list]
+    RRFCalc --> MergeScores[Merge by DocumentId<br/>Sum RRF scores]
+    MergeScores --> SortFused[Sort by fused score<br/>Return top N]
+    SortFused --> HybridResults[Hybrid Fused Results]
+
+    BM25Results --> Output([Search Results<br/>with scores and metadata])
+    VectorResults --> Output
+    HybridResults --> Output
+
+    style Query fill:#e1f5ff
+    style Output fill:#d4edda
+    style BM25Path fill:#fff3cd
+    style VectorPath fill:#d1ecf1
+    style HybridPath fill:#f8d7da
+    style RRF fill:#e7e7ff
+```
+
+#### Search Pipeline Phases
+
+**BM25 Search Mode**
+
+*Phase 1a: Query Parsing*
+- **Component**: `QueryParser` with `StandardAnalyzer`
+- **Location**: `LuceneRepository.QueryLuceneAsync()`
+- **Process**:
+  - Parses query text using Lucene's QueryParser
+  - Applies StandardAnalyzer for tokenization and normalization
+  - Generates query against the "content" field
+  - Optional: Adds BooleanQuery filter for source_id constraints
+
+*Phase 2a: Lucene Search*
+- **Component**: `LuceneRepository` with `BM25Similarity`
+- **Process**:
+  - Opens Lucene FSDirectory index
+  - Executes search with BM25 relevance scoring
+  - BM25 considers term frequency, document frequency, and document length
+  - Returns scored `SearchResult` objects with metadata
+  - Results include: score, content, source file, source path, source id, paragraph number, document id
+
+**Vector Search Mode**
+
+*Phase 1b: Query Embedding*
+- **Component**: `IEmbeddingService` with OpenAI `text-embedding-3-large`
+- **Location**: `VectorRepository.QueryVectorsAsync()`
+- **Process**:
+  - Generates 3072-dimension embedding vector for query text
+  - Uses same model as document ingestion for consistency
+  - Requires `OPENAI_API_KEY` environment variable
+
+*Phase 2b: Vector Similarity Search*
+- **Component**: `VectorRepository` with SQLite-vec
+- **Process**:
+  - Opens SQLite-vec database at `{index-path}/vectors.db`
+  - Performs vector similarity search using Euclidean distance
+  - Converts Euclidean distance to cosine similarity: `1.0 - (distance² / 2.0)`
+  - Optional: Applies source_id filter via VectorSearchOptions
+  - Returns scored `SearchResult` objects
+  - Results ranked by semantic similarity to query
+
+**Hybrid Search Mode**
+
+*Phase 1-2: Parallel Execution*
+- **Process**:
+  - Executes both BM25 and Vector searches concurrently
+  - Fetches `2 × max_results` from each index (minimum 20 per index)
+  - Over-fetching ensures better fusion quality
+  - Both searches apply same source_id filters if specified
+
+*Phase 3: Reciprocal Rank Fusion (RRF)*
+- **Component**: `RrfReranker`
+- **Algorithm**: Reciprocal Rank Fusion with k=60 (standard parameter)
+- **Formula**: `RRF_score(doc) = Σ(1 / (k + rank))` across both result lists
+- **Process**:
+  1. Receives results from both BM25 and Vector searches
+  2. Calculates RRF score for each document in each list
+  3. Groups results by DocumentId
+  4. Sums RRF scores for documents appearing in both lists
+  5. Sorts merged results by total RRF score (descending)
+  6. Returns top N results as specified by max_results
+- **Benefits**:
+  - Combines strengths of keyword matching (BM25) and semantic understanding (vectors)
+  - Documents appearing in both result sets get higher scores
+  - Robust to differences in scoring scales between BM25 and vector search
+  - No manual weight tuning required
+
+**Orchestrator**: `SearchIndexer.SearchAsync()`
+
+#### Search Result Output
+
+All search modes return `SearchResult` objects containing:
+- **Score**: Relevance score (BM25 score, cosine similarity, or RRF score)
+- **Content**: The chunk text content
+- **SourceFile**: Original filename
+- **SourcePath**: Full file path
+- **SourceId**: Unique source identifier
+- **ParagraphNumber**: Chunk sequence number
+- **DocumentId**: Unique document identifier
+
 ## Technical Details
 
 ### BM25 Similarity Search
