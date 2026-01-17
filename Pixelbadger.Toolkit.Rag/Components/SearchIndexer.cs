@@ -14,12 +14,14 @@ public class SearchIndexer
     private readonly ILuceneRepository _luceneRepo;
     private readonly IVectorRepository _vectorRepo;
     private readonly IReranker _reranker;
+    private readonly ITextChunker _chunker;
 
-    public SearchIndexer(ILuceneRepository luceneRepo, IVectorRepository vectorRepo, IReranker reranker)
+    public SearchIndexer(ILuceneRepository luceneRepo, IVectorRepository vectorRepo, IReranker reranker, ITextChunker chunker)
     {
         _luceneRepo = luceneRepo;
         _vectorRepo = vectorRepo;
         _reranker = reranker;
+        _chunker = chunker;
     }
 
     public Task IngestContentAsync(string indexPath, string contentPath, string? chunkingStrategy = null)
@@ -92,32 +94,8 @@ public class SearchIndexer
         return _reranker.RerankResults(bm25Results, vectorResults, maxResults);
     }
 
-    private static async Task<List<IChunk>> GetChunksForFileAsync(string filePath, string content, string? chunkingStrategy = null)
+    private async Task<List<IChunk>> GetChunksForFileAsync(string filePath, string content, string? chunkingStrategy = null)
     {
-        ITextChunker chunker;
-
-        // If explicit strategy is provided, use it
-        if (!string.IsNullOrEmpty(chunkingStrategy))
-        {
-            chunker = chunkingStrategy.ToLowerInvariant() switch
-            {
-                "semantic" => new SemanticTextChunker(),
-                "markdown" => new MarkdownTextChunker(),
-                "paragraph" => new ParagraphTextChunker(),
-                _ => throw new ArgumentException($"Unknown chunking strategy: {chunkingStrategy}")
-            };
-        }
-        else
-        {
-            // Auto-detect based on file extension
-            var extension = Path.GetExtension(filePath).ToLowerInvariant();
-            chunker = extension switch
-            {
-                ".md" or ".markdown" => new MarkdownTextChunker(),
-                _ => new ParagraphTextChunker()
-            };
-        }
-
-        return await chunker.ChunkTextAsync(content);
+        return await _chunker.ChunkTextAsync(content);
     }
 }

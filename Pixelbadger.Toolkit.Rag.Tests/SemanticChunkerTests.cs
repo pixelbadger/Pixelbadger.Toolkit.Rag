@@ -122,7 +122,7 @@ public class SemanticChunkerTests
     /// <summary>
     /// Testable version of SemanticTextChunker that accepts a mock embedding generator
     /// </summary>
-    private class TestableSemanticTextChunker : ITextChunker
+    public class TestableSemanticTextChunker : ITextChunker
     {
         private readonly IEmbeddingGenerator<string, Embedding<float>> _embeddingGenerator;
         private readonly int _tokenLimit;

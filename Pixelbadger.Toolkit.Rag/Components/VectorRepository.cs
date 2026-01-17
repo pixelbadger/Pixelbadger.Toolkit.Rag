@@ -21,15 +21,10 @@ public class VectorRepository : IVectorRepository
         var sourceId = Path.GetFileNameWithoutExtension(contentPath);
         var sourceFile = Path.GetFileName(contentPath);
 
-        // Generate embeddings in batch for efficiency
-        var chunkTexts = chunks.Select(c => c.Content).ToList();
-        var embeddings = await _embeddingService.GenerateEmbeddingsAsync(chunkTexts);
-
-        // Create vector records
+        // Create vector records using pre-generated embeddings from chunks
         var records = new List<ChunkVectorRecord>();
-        for (int i = 0; i < chunks.Count; i++)
+        foreach (var chunk in chunks)
         {
-            var chunk = chunks[i];
             var record = new ChunkVectorRecord
             {
                 Key = $"{sourceId}_{chunk.ChunkNumber}",
@@ -39,7 +34,7 @@ public class VectorRepository : IVectorRepository
                 SourceId = sourceId,
                 ChunkNumber = chunk.ChunkNumber,
                 DocumentId = $"{sourceFile}_{chunk.ChunkNumber}",
-                Embedding = embeddings[i]
+                Embedding = chunk.Embedding
             };
             records.Add(record);
         }

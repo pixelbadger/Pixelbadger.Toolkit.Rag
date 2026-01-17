@@ -9,13 +9,18 @@ public static class DependencyInjection
     public static IServiceCollection AddRagServices(this IServiceCollection services)
     {
         services.AddSingleton<IEmbeddingService, OpenAIEmbeddingService>();
-        services.AddTransient<ITextChunker, MarkdownTextChunker>();
-        services.AddTransient<ITextChunker, ParagraphTextChunker>();
         services.AddTransient<ITextChunker, SemanticTextChunker>();
         services.AddTransient<ILuceneRepository, LuceneRepository>();
         services.AddTransient<IVectorRepository, VectorRepository>();
         services.AddTransient<IReranker, RrfReranker>();
-        services.AddTransient<SearchIndexer>();
+        services.AddTransient<SearchIndexer>((sp) =>
+        {
+            var luceneRepo = sp.GetRequiredService<ILuceneRepository>();
+            var vectorRepo = sp.GetRequiredService<IVectorRepository>();
+            var reranker = sp.GetRequiredService<IReranker>();
+            var chunker = sp.GetRequiredService<ITextChunker>();
+            return new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker);
+        });
         services.AddTransient<McpRagServer>();
         services.AddSingleton<IChatClient>(sp =>
         {

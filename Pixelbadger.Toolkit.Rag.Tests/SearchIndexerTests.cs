@@ -14,7 +14,9 @@ public class SearchIndexerTests : IDisposable
         var luceneRepo = new LuceneRepository();
         var vectorRepo = new VectorRepository(new MockEmbeddingService());
         var reranker = new RrfReranker();
-        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker);
+        var mockGenerator = new MockEmbeddingGenerator();
+        var chunker = new SemanticChunkerTests.TestableSemanticTextChunker(mockGenerator);
+        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker, chunker);
         _testDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(_testDirectory);
         _indexPath = Path.Combine(_testDirectory, "test-index");
