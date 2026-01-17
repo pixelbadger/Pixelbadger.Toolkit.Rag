@@ -71,7 +71,7 @@ public class SearchIndexer
         options ??= new IngestOptions();
 
         // Discover all files in the folder
-        var allFiles = System.IO.Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories);
+        var allFiles = System.IO.Directory.GetFiles(folderPath, "*.*", System.IO.SearchOption.AllDirectories);
 
         // Filter to only supported file types
         var supportedFiles = allFiles.Where(file => _fileReaderFactory.CanRead(file)).ToList();
