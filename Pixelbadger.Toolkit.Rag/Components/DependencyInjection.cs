@@ -4,6 +4,8 @@ using Microsoft.Extensions.Http.Resilience;
 using Pixelbadger.Toolkit.Rag.Commands;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
 using Polly;
+using System.ClientModel;
+using System.ClientModel.Primitives;
 using System.Net;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
@@ -71,7 +73,13 @@ public static class DependencyInjection
 
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient("OpenAI");
-            var client = new OpenAI.OpenAIClient(apiKey, new OpenAI.OpenAIClientOptions { Transport = new OpenAI.HttpClientTransport(httpClient) });
+            var options = new OpenAI.OpenAIClientOptions
+            {
+                Transport = new HttpClientPipelineTransport(httpClient),
+                RetryPolicy = new ClientRetryPolicy(maxRetries: 0),  // Disable built-in retries since HttpClient has retry policy
+                NetworkTimeout = Timeout.InfiniteTimeSpan  // Timeout handled by HttpClient resilience policy
+            };
+            var client = new OpenAI.OpenAIClient(new ApiKeyCredential(apiKey), options);
             var embeddingClient = client.GetEmbeddingClient("text-embedding-3-large");
             return embeddingClient.AsIEmbeddingGenerator();
         });
@@ -103,7 +111,13 @@ public static class DependencyInjection
 
             var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
             var httpClient = httpClientFactory.CreateClient("OpenAI");
-            var client = new OpenAI.OpenAIClient(apiKey, new OpenAI.OpenAIClientOptions { Transport = new OpenAI.HttpClientTransport(httpClient) });
+            var options = new OpenAI.OpenAIClientOptions
+            {
+                Transport = new HttpClientPipelineTransport(httpClient),
+                RetryPolicy = new ClientRetryPolicy(maxRetries: 0),  // Disable built-in retries since HttpClient has retry policy
+                NetworkTimeout = Timeout.InfiniteTimeSpan  // Timeout handled by HttpClient resilience policy
+            };
+            var client = new OpenAI.OpenAIClient(new ApiKeyCredential(apiKey), options);
             return client.GetChatClient("gpt-4o-mini").AsIChatClient();
         });
 
