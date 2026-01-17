@@ -22,6 +22,28 @@ public static class DependencyInjection
                 options.Retry.BackoffType = Polly.DelayBackoffType.Exponential;
                 options.Retry.UseJitter = true;
 
+                // Prefer Retry-After header value, fallback to exponential backoff
+                options.Retry.DelayGenerator = args =>
+                {
+                    var response = args.Outcome.Result;
+                    if (response?.Headers.RetryAfter != null)
+                    {
+                        // Use Retry-After header if present
+                        if (response.Headers.RetryAfter.Delta.HasValue)
+                        {
+                            return new ValueTask<TimeSpan?>(response.Headers.RetryAfter.Delta.Value);
+                        }
+                        else if (response.Headers.RetryAfter.Date.HasValue)
+                        {
+                            var delay = response.Headers.RetryAfter.Date.Value - DateTimeOffset.UtcNow;
+                            return new ValueTask<TimeSpan?>(delay > TimeSpan.Zero ? delay : TimeSpan.Zero);
+                        }
+                    }
+
+                    // Fallback to default exponential backoff with jitter
+                    return ValueTask.FromResult<TimeSpan?>(null);
+                };
+
                 // Handle 429 (Too Many Requests) specifically
                 options.Retry.ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
                     .HandleResult(response =>
