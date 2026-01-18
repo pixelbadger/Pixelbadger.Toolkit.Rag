@@ -14,12 +14,10 @@ var rootCommand = new RootCommand("RAG toolkit for BM25 search indexing, queryin
 
 var ingestCommand = serviceProvider.GetRequiredService<IngestCommand>();
 var queryCommand = serviceProvider.GetRequiredService<QueryCommand>();
-var evalCommand = serviceProvider.GetRequiredService<EvalCommand>();
 var serveCommand = serviceProvider.GetRequiredService<ServeCommand>();
 
 rootCommand.AddCommand(ingestCommand.Create());
 rootCommand.AddCommand(queryCommand.Create());
-rootCommand.AddCommand(evalCommand.Create());
 rootCommand.AddCommand(serveCommand.Create());
 
 return await rootCommand.InvokeAsync(args);

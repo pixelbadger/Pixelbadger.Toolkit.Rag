@@ -8,12 +8,10 @@ namespace Pixelbadger.Toolkit.Rag.Commands;
 public class IngestCommand
 {
     private readonly SearchIndexer _indexer;
-    private readonly EvalGenerator _evalGenerator;
 
-    public IngestCommand(SearchIndexer indexer, EvalGenerator evalGenerator)
+    public IngestCommand(SearchIndexer indexer)
     {
         _indexer = indexer;
-        _evalGenerator = evalGenerator;
     }
 
     public Command Create()
@@ -34,18 +32,10 @@ public class IngestCommand
             IsRequired = true
         };
 
-        var evalsOption = new Option<int?>(
-            aliases: ["--evals"],
-            description: "Generate evaluation queries after ingestion (requires OPENAI_API_KEY). Number specifies how many query/answer pairs to generate.")
-        {
-            IsRequired = false
-        };
-
         command.AddOption(indexPathOption);
         command.AddOption(contentPathOption);
-        command.AddOption(evalsOption);
 
-        command.SetHandler(async (string indexPath, string contentPath, int? evalsCount) =>
+        command.SetHandler(async (string indexPath, string contentPath) =>
         {
             try
             {
@@ -68,17 +58,6 @@ public class IngestCommand
                     await _indexer.IngestContentAsync(indexPath, contentPath, options);
 
                     Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using semantic chunking with vector embeddings");
-
-                    if (evalsCount.HasValue && evalsCount.Value > 0)
-                    {
-                        Console.WriteLine($"Generating {evalsCount.Value} evaluation queries...");
-                        var content = await File.ReadAllTextAsync(contentPath);
-                        var evals = await _evalGenerator.GenerateAsync(content, evalsCount.Value);
-
-                        var evalsPath = Path.Combine(indexPath, "evals.json");
-                        await File.WriteAllTextAsync(evalsPath, JsonSerializer.Serialize(evals, new JsonSerializerOptions { WriteIndented = true }));
-                        Console.WriteLine($"Evaluation queries saved to '{evalsPath}'");
-                    }
                 }
                 else
                 {
@@ -90,7 +69,7 @@ public class IngestCommand
                 Console.WriteLine($"Error: {ex.Message}");
                 Environment.Exit(1);
             }
-        }, indexPathOption, contentPathOption, evalsOption);
+        }, indexPathOption, contentPathOption);
 
         return command;
     }

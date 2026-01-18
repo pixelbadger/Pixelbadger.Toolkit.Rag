@@ -103,31 +103,9 @@ public static class DependencyInjection
             return new SearchIndexer(luceneRepo, vectorRepo, reranker, chunkerFactory, fileReaderFactory);
         });
         services.AddTransient<McpRagServer>();
-        services.AddSingleton<IChatClient>(sp =>
-        {
-            var apiKey = Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-            if (string.IsNullOrEmpty(apiKey))
-                throw new InvalidOperationException("OPENAI_API_KEY environment variable is required");
-
-            var httpClientFactory = sp.GetRequiredService<IHttpClientFactory>();
-            var httpClient = httpClientFactory.CreateClient("OpenAI");
-            var options = new OpenAI.OpenAIClientOptions
-            {
-                Transport = new HttpClientPipelineTransport(httpClient),
-                RetryPolicy = new ClientRetryPolicy(maxRetries: 0),  // Disable built-in retries since HttpClient has retry policy
-                NetworkTimeout = Timeout.InfiniteTimeSpan  // Timeout handled by HttpClient resilience policy
-            };
-            var client = new OpenAI.OpenAIClient(new ApiKeyCredential(apiKey), options);
-            return client.GetChatClient("gpt-4o-mini").AsIChatClient();
-        });
-
-        // Register evaluation components
-        services.AddTransient<EvalGenerator>();
-        services.AddTransient<EvalValidator>();
 
         services.AddTransient<QueryCommand>();
         services.AddTransient<IngestCommand>();
-        services.AddTransient<EvalCommand>();
         services.AddTransient<ServeCommand>();
 
         return services;
