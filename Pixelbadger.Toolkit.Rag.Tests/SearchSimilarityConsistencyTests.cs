@@ -16,7 +16,12 @@ public class SearchSimilarityConsistencyTests : IDisposable
         var luceneRepo = new LuceneRepository();
         var vectorRepo = new VectorRepository(new MockEmbeddingService());
         var reranker = new RrfReranker();
-        var chunkerFactory = new ChunkerFactory();
+        var chunkers = new List<ITextChunker>
+        {
+            new MarkdownTextChunker(),
+            new ParagraphTextChunker()
+        };
+        var chunkerFactory = new ChunkerFactory(chunkers);
         var fileReaders = new List<IFileReader>
         {
             new PlainTextFileReader(),
