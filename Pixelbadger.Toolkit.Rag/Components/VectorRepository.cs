@@ -5,43 +5,6 @@ using Pixelbadger.Toolkit.Rag.Dtos;
 namespace Pixelbadger.Toolkit.Rag.Components;
 
 /// <summary>
-/// Data model for storing chunk embeddings in the vector store.
-/// </summary>
-public class ChunkVectorRecord
-{
-    [VectorStoreKey]
-    public string Key { get; set; } = string.Empty;
-
-    [VectorStoreData]
-    public string Content { get; set; } = string.Empty;
-
-    [VectorStoreData]
-    public string SourceFile { get; set; } = string.Empty;
-
-    [VectorStoreData]
-    public string SourcePath { get; set; } = string.Empty;
-
-    [VectorStoreData]
-    public string SourceId { get; set; } = string.Empty;
-
-    [VectorStoreData]
-    public int ChunkNumber { get; set; }
-
-    [VectorStoreData]
-    public string DocumentId { get; set; } = string.Empty;
-
-    [VectorStoreVector(3072, DistanceFunction = DistanceFunction.EuclideanDistance)]
-    public ReadOnlyMemory<float> Embedding { get; set; }
-}
-
-public interface IVectorRepository
-{
-    Task StoreVectorsAsync(string indexPath, string contentPath, List<IChunk> chunks);
-    Task<List<SearchResult>> QueryVectorsAsync(string indexPath, string queryText, int maxResults, string[]? sourceIds);
-    bool Exists(string indexPath);
-}
-
-/// <summary>
 /// Vector repository backed by SQLite-vec for storing and searching chunk embeddings.
 /// Generates embeddings for chunks during storage and for query text at search time.
 /// </summary>

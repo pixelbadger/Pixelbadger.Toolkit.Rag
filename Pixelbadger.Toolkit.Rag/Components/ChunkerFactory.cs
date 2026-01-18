@@ -5,13 +5,13 @@ namespace Pixelbadger.Toolkit.Rag.Components;
 /// </summary>
 public class ChunkerFactory
 {
-    private readonly MarkdownTextChunker _markdownChunker;
-    private readonly ParagraphTextChunker _paragraphChunker;
+    private readonly ITextChunker _markdownChunker;
+    private readonly ITextChunker _paragraphChunker;
 
-    public ChunkerFactory()
+    public ChunkerFactory(IEnumerable<ITextChunker> chunkers)
     {
-        _markdownChunker = new MarkdownTextChunker();
-        _paragraphChunker = new ParagraphTextChunker();
+        _markdownChunker = chunkers.OfType<MarkdownTextChunker>().First();
+        _paragraphChunker = chunkers.OfType<ParagraphTextChunker>().First();
     }
 
     /// <summary>

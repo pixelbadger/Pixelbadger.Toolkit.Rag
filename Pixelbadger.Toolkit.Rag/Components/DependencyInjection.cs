@@ -83,7 +83,12 @@ public static class DependencyInjection
             return embeddingClient.AsIEmbeddingGenerator();
         });
         services.AddSingleton<IEmbeddingService>(sp => new OpenAIEmbeddingService(sp.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>()));
+
+        // Register text chunkers
+        services.AddTransient<ITextChunker, MarkdownTextChunker>();
+        services.AddTransient<ITextChunker, ParagraphTextChunker>();
         services.AddTransient<ChunkerFactory>();
+
         services.AddTransient<ILuceneRepository, LuceneRepository>();
         services.AddTransient<IVectorRepository, VectorRepository>();
         services.AddTransient<IReranker, RrfReranker>();
