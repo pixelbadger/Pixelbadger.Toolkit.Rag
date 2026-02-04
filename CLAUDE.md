@@ -132,6 +132,48 @@ await act.Should().ThrowAsync<FileNotFoundException>();
 
 Generates deterministic 3072-dimensional embeddings based on text hash. Use for all tests to avoid OpenAI API calls.
 
+## CI/CD
+
+### GitHub Actions Workflows
+
+| Workflow | Trigger | Purpose |
+|----------|---------|---------|
+| `pr-validation.yml` | PR to master | Build, test, validate version bump |
+| `publish-to-nuget.yml` | Push to master | Build, test, publish to NuGet.org |
+
+### Version Requirements
+
+**IMPORTANT:** PRs that modify code in `Pixelbadger.Toolkit.Rag/` (excluding tests) MUST increment the version.
+
+The CI runs `.github/scripts/check-version-increment.ps1` which:
+1. Reads `<Version>` from the `.csproj`
+2. Queries NuGet.org for the latest published version
+3. Fails if current version ≤ published version
+
+### How to Bump Version
+
+Edit `Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj`:
+```xml
+<Version>X.Y.Z</Version>
+```
+
+Use semantic versioning:
+- **Major** (X): Breaking API changes
+- **Minor** (Y): New features, backward compatible
+- **Patch** (Z): Bug fixes, backward compatible
+
+### Secrets Required
+
+| Secret | Purpose |
+|--------|---------|
+| `NUGET_API_KEY` | API key for publishing to NuGet.org |
+
+### CI Behavior Notes
+
+- Test failures use `continue-on-error: true` (won't block publish)
+- Path filters exclude `.github/` and test project changes from triggering version checks
+- Publish uses `--skip-duplicate` to handle re-runs gracefully
+
 ## Search Modes
 
 | Mode | Implementation | Best For |
