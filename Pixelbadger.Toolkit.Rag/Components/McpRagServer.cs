@@ -11,13 +11,13 @@ namespace Pixelbadger.Toolkit.Rag.Components;
 public class McpRagServer
 {
     private static string _indexPath = string.Empty;
-    private static SearchIndexer _searchIndexer;
-    private static IEmbeddingService _embeddingService;
+    private static ISearchService _searchService = null!;
+    private static IEmbeddingService _embeddingService = null!;
 
-    public McpRagServer(string indexPath, SearchIndexer searchIndexer, IEmbeddingService embeddingService)
+    public McpRagServer(string indexPath, ISearchService searchService, IEmbeddingService embeddingService)
     {
         _indexPath = indexPath;
-        _searchIndexer = searchIndexer;
+        _searchService = searchService;
         _embeddingService = embeddingService;
     }
 
@@ -57,7 +57,7 @@ public class McpRagServer
 
             var mode = ParseSearchMode(searchMode);
 
-            var results = await _searchIndexer.SearchAsync(_indexPath, query, mode, maxResults, sourceIds);
+            var results = await _searchService.SearchAsync(_indexPath, query, mode, maxResults, sourceIds);
             return new { content = FormatSearchResults(results, searchMode) };
         }
         catch (Exception ex)

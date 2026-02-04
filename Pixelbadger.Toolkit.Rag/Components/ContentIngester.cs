@@ -1,29 +1,23 @@
-using Lucene.Net.Analysis.Standard;
-using Lucene.Net.Documents;
-using Lucene.Net.Index;
-using Lucene.Net.QueryParsers.Classic;
-using Lucene.Net.Search;
-using Lucene.Net.Search.Similarities;
-using Lucene.Net.Store;
-using Lucene.Net.Util;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
 using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
-public class SearchIndexer
+public class ContentIngester : IContentIngester
 {
     private readonly ILuceneRepository _luceneRepo;
     private readonly IVectorRepository _vectorRepo;
-    private readonly IReranker _reranker;
     private readonly ChunkerFactory _chunkerFactory;
     private readonly FileReaderFactory _fileReaderFactory;
 
-    public SearchIndexer(ILuceneRepository luceneRepo, IVectorRepository vectorRepo, IReranker reranker, ChunkerFactory chunkerFactory, FileReaderFactory fileReaderFactory)
+    public ContentIngester(
+        ILuceneRepository luceneRepo,
+        IVectorRepository vectorRepo,
+        ChunkerFactory chunkerFactory,
+        FileReaderFactory fileReaderFactory)
     {
         _luceneRepo = luceneRepo;
         _vectorRepo = vectorRepo;
-        _reranker = reranker;
         _chunkerFactory = chunkerFactory;
         _fileReaderFactory = fileReaderFactory;
     }
@@ -55,15 +49,9 @@ public class SearchIndexer
         await _vectorRepo.StoreVectorsAsync(indexPath, contentPath, nonEmptyChunks);
     }
 
-    /// <summary>
-    /// Ingests all supported files from a folder into the search index.
-    /// </summary>
-    /// <param name="indexPath">Path to the Lucene index directory.</param>
-    /// <param name="folderPath">Path to the folder containing files to ingest.</param>
-    /// <param name="options">Optional ingestion options.</param>
     public async Task IngestFolderAsync(string indexPath, string folderPath, IngestOptions? options = null)
     {
-        if (!System.IO.Directory.Exists(folderPath))
+        if (!Directory.Exists(folderPath))
         {
             throw new DirectoryNotFoundException($"Folder not found: {folderPath}");
         }
@@ -71,7 +59,7 @@ public class SearchIndexer
         options ??= new IngestOptions();
 
         // Discover all files in the folder
-        var allFiles = System.IO.Directory.GetFiles(folderPath, "*.*", System.IO.SearchOption.AllDirectories);
+        var allFiles = Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories);
 
         // Filter to only supported file types
         var supportedFiles = allFiles.Where(file => _fileReaderFactory.CanRead(file)).ToList();
@@ -126,49 +114,6 @@ public class SearchIndexer
         }
 
         Console.WriteLine($"Completed ingestion of {supportedFiles.Count} files");
-    }
-
-    /// <summary>
-    /// Performs search using the specified mode.
-    /// </summary>
-    public async Task<List<SearchResult>> SearchAsync(string indexPath, string queryText, SearchMode mode, int maxResults = 10, string[]? sourceIds = null)
-    {
-        return mode switch
-        {
-            SearchMode.Bm25 => await _luceneRepo.QueryLuceneAsync(indexPath, queryText, maxResults, sourceIds),
-            SearchMode.Vector => await VectorQueryAsync(indexPath, queryText, maxResults, sourceIds),
-            SearchMode.Hybrid => await HybridQueryAsync(indexPath, queryText, maxResults, sourceIds),
-            _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown search mode")
-        };
-    }
-
-    /// <summary>
-    /// Performs vector similarity search using embeddings.
-    /// </summary>
-    public async Task<List<SearchResult>> VectorQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
-    {
-        return await _vectorRepo.QueryVectorsAsync(indexPath, queryText, maxResults, sourceIds);
-    }
-
-    /// <summary>
-    /// Performs hybrid search combining BM25 and vector search using Reciprocal Rank Fusion.
-    /// </summary>
-    public async Task<List<SearchResult>> HybridQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
-    {
-        // Fetch more results from each search to improve fusion quality
-        var fetchCount = Math.Max(maxResults * 2, 20);
-
-        // Run both searches in parallel
-        var bm25Task = _luceneRepo.QueryLuceneAsync(indexPath, queryText, fetchCount, sourceIds);
-        var vectorTask = VectorQueryAsync(indexPath, queryText, fetchCount, sourceIds);
-
-        await Task.WhenAll(bm25Task, vectorTask);
-
-        var bm25Results = bm25Task.Result;
-        var vectorResults = vectorTask.Result;
-
-        // Apply Reranker
-        return _reranker.RerankResults(bm25Results, vectorResults, maxResults);
     }
 
     private async Task<List<IChunk>> GetChunksForFileAsync(string filePath, string content)

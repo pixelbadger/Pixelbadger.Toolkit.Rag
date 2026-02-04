@@ -98,15 +98,8 @@ public static class DependencyInjection
         services.AddTransient<IFileReader, MarkdownFileReader>();
         services.AddTransient<FileReaderFactory>();
 
-        services.AddTransient<SearchIndexer>((sp) =>
-        {
-            var luceneRepo = sp.GetRequiredService<ILuceneRepository>();
-            var vectorRepo = sp.GetRequiredService<IVectorRepository>();
-            var reranker = sp.GetRequiredService<IReranker>();
-            var chunkerFactory = sp.GetRequiredService<ChunkerFactory>();
-            var fileReaderFactory = sp.GetRequiredService<FileReaderFactory>();
-            return new SearchIndexer(luceneRepo, vectorRepo, reranker, chunkerFactory, fileReaderFactory);
-        });
+        services.AddTransient<IContentIngester, ContentIngester>();
+        services.AddTransient<ISearchService, SearchService>();
         services.AddTransient<McpRagServer>();
 
         services.AddTransient<QueryCommand>();
