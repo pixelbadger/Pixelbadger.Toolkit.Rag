@@ -1,5 +1,4 @@
 using System.CommandLine;
-using System.Text.Json;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Dtos;
 
@@ -7,11 +6,11 @@ namespace Pixelbadger.Toolkit.Rag.Commands;
 
 public class IngestCommand
 {
-    private readonly SearchIndexer _indexer;
+    private readonly IContentIngester _ingester;
 
-    public IngestCommand(SearchIndexer indexer)
+    public IngestCommand(IContentIngester ingester)
     {
-        _indexer = indexer;
+        _ingester = ingester;
     }
 
     public Command Create()
@@ -48,14 +47,14 @@ public class IngestCommand
                 if (Directory.Exists(contentPath))
                 {
                     // Folder-based ingestion
-                    await _indexer.IngestFolderAsync(indexPath, contentPath, options);
+                    await _ingester.IngestFolderAsync(indexPath, contentPath, options);
 
                     Console.WriteLine($"Successfully ingested all supported files from folder '{contentPath}' into index at '{indexPath}' using semantic chunking with vector embeddings");
                 }
                 else if (File.Exists(contentPath))
                 {
                     // Single file ingestion (backward compatibility)
-                    await _indexer.IngestContentAsync(indexPath, contentPath, options);
+                    await _ingester.IngestContentAsync(indexPath, contentPath, options);
 
                     Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using semantic chunking with vector embeddings");
                 }

@@ -6,11 +6,11 @@ namespace Pixelbadger.Toolkit.Rag.Commands;
 
 public class QueryCommand
 {
-    private readonly SearchIndexer _indexer;
+    private readonly ISearchService _searchService;
 
-    public QueryCommand(SearchIndexer indexer)
+    public QueryCommand(ISearchService searchService)
     {
-        _indexer = indexer;
+        _searchService = searchService;
     }
 
     public Command Create()
@@ -65,7 +65,7 @@ public class QueryCommand
             try
             {
                 var searchMode = ParseSearchMode(searchModeStr);
-                var results = await _indexer.SearchAsync(indexPath, query, searchMode, maxResults, sourceIds);
+                var results = await _searchService.SearchAsync(indexPath, query, searchMode, maxResults, sourceIds);
 
                 if (results.Count == 0)
                 {

@@ -7,7 +7,8 @@ namespace Pixelbadger.Toolkit.Rag.Tests;
 
 public class SearchIndexerTests : IDisposable
 {
-    private readonly SearchIndexer _indexer;
+    private readonly IContentIngester _ingester;
+    private readonly ISearchService _searchService;
     private readonly string _testDirectory;
     private readonly string _indexPath;
 
@@ -28,7 +29,8 @@ public class SearchIndexerTests : IDisposable
             new MarkdownFileReader()
         };
         var fileReaderFactory = new FileReaderFactory(fileReaders);
-        _indexer = new SearchIndexer(luceneRepo, vectorRepo, reranker, chunkerFactory, fileReaderFactory);
+        _ingester = new ContentIngester(luceneRepo, vectorRepo, chunkerFactory, fileReaderFactory);
+        _searchService = new SearchService(luceneRepo, vectorRepo, reranker);
         _testDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
         Directory.CreateDirectory(_testDirectory);
         _indexPath = Path.Combine(_testDirectory, "test-index");
@@ -47,7 +49,7 @@ public class SearchIndexerTests : IDisposable
         var content = "This is a test document.\n\nIt has multiple paragraphs for testing search functionality.";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
 
         Directory.Exists(_indexPath).Should().BeTrue();
         var indexFiles = Directory.GetFiles(_indexPath);
@@ -60,7 +62,7 @@ public class SearchIndexerTests : IDisposable
     {
         var nonExistentFile = Path.Combine(_testDirectory, "nonexistent.txt");
 
-        var act = async () => await _indexer.IngestContentAsync(_indexPath, nonExistentFile);
+        var act = async () => await _ingester.IngestContentAsync(_indexPath, nonExistentFile);
 
         await act.Should().ThrowAsync<FileNotFoundException>()
             .WithMessage($"Content file not found: {nonExistentFile}");
@@ -73,8 +75,8 @@ public class SearchIndexerTests : IDisposable
         var content = "The quick brown fox jumps over the lazy dog.\n\nThis is a second paragraph about cats and dogs.";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "fox", SearchMode.Bm25, 10);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "fox", SearchMode.Bm25, 10);
 
         results.Should().HaveCount(1);
         results[0].Content.Should().Be("The quick brown fox jumps over the lazy dog.");
@@ -86,7 +88,7 @@ public class SearchIndexerTests : IDisposable
     {
         var nonExistentIndex = Path.Combine(_testDirectory, "nonexistent-index");
 
-        var act = async () => await _indexer.SearchAsync(nonExistentIndex, "test", SearchMode.Bm25, 10, null);
+        var act = async () => await _searchService.SearchAsync(nonExistentIndex, "test", SearchMode.Bm25, 10, null);
 
         await act.Should().ThrowAsync<DirectoryNotFoundException>()
             .WithMessage($"Index directory not found: {nonExistentIndex}");
@@ -99,8 +101,8 @@ public class SearchIndexerTests : IDisposable
         var content = "The quick brown fox jumps over the lazy dog.";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "elephant", SearchMode.Bm25, 10, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "elephant", SearchMode.Bm25, 10, null);
 
         results.Should().BeEmpty();
     }
@@ -112,8 +114,8 @@ public class SearchIndexerTests : IDisposable
         var content = string.Join("\n\n", Enumerable.Repeat("This is a test paragraph about dogs.", 10));
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "dogs", SearchMode.Bm25, 3, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "dogs", SearchMode.Bm25, 3, null);
 
         results.Should().HaveCountLessThanOrEqualTo(3);
     }
@@ -127,10 +129,10 @@ public class SearchIndexerTests : IDisposable
         await File.WriteAllTextAsync(contentFile1, "This document mentions cats.");
         await File.WriteAllTextAsync(contentFile2, "This document mentions cats too.");
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile1);
-        await _indexer.IngestContentAsync(_indexPath, contentFile2);
+        await _ingester.IngestContentAsync(_indexPath, contentFile1);
+        await _ingester.IngestContentAsync(_indexPath, contentFile2);
 
-        var results = await _indexer.SearchAsync(_indexPath, "cats", SearchMode.Bm25, 10, new[] { "content1" });
+        var results = await _searchService.SearchAsync(_indexPath, "cats", SearchMode.Bm25, 10, new[] { "content1" });
 
         results.Should().HaveCount(1);
         results.Should().OnlyContain(r => r.SourceId == "content1");
@@ -144,8 +146,8 @@ public class SearchIndexerTests : IDisposable
         var content = "First paragraph about testing.\n\nSecond paragraph about search functionality.";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "testing", SearchMode.Bm25, 10, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "testing", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(1);
         var result = results[0];
@@ -166,8 +168,8 @@ public class SearchIndexerTests : IDisposable
         var contentFile = Path.Combine(_testDirectory, "content.txt");
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, searchTerm, SearchMode.Bm25, 10, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, searchTerm, SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(1);
         results[0].Content.Should().Be(content);
@@ -187,8 +189,8 @@ Algorithms can solve complex problems.
 Complex problems require innovative solutions.";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "machine learning", SearchMode.Bm25, 10, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "machine learning", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCountGreaterThanOrEqualTo(2);
         results.Should().BeInDescendingOrder(r => r.Score);
@@ -206,8 +208,8 @@ Complex problems require innovative solutions.";
         var content = "This is a test with special characters: éñ@#$%^&*()!? 测试内容";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "special", SearchMode.Bm25, 10, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "special", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(1);
         results[0].Content.Should().Be("This is a test with special characters: éñ@#$%^&*()!? 测试内容");
@@ -220,8 +222,8 @@ Complex problems require innovative solutions.";
         var content = "First paragraph.\n\n\n   \n\nSecond paragraph after empty lines.";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "paragraph", SearchMode.Bm25, 10, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "paragraph", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(2);
         results.Should().OnlyContain(r => !string.IsNullOrWhiteSpace(r.Content));
@@ -240,8 +242,8 @@ Document about dogs.
 Document about cats and dogs together.";
         await File.WriteAllTextAsync(contentFile, content);
 
-        await _indexer.IngestContentAsync(_indexPath, contentFile);
-        var results = await _indexer.SearchAsync(_indexPath, "cats", SearchMode.Bm25, 10, null);
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "cats", SearchMode.Bm25, 10, null);
 
         results.Should().HaveCount(2);
         results.Should().BeInDescendingOrder(r => r.Score);
@@ -269,15 +271,15 @@ Document about cats and dogs together.";
         await File.WriteAllTextAsync(mdFile, "# Markdown Notes\n\nThis is a markdown document about data science.");
         await File.WriteAllTextAsync(unsupportedFile, "{\"key\": \"value\"}");
 
-        await _indexer.IngestFolderAsync(_indexPath, folderPath);
+        await _ingester.IngestFolderAsync(_indexPath, folderPath);
 
         // Verify index was created
         Directory.Exists(_indexPath).Should().BeTrue();
 
         // Search for content from different files
-        var aiResults = await _indexer.SearchAsync(_indexPath, "artificial intelligence", SearchMode.Bm25, 10, null);
-        var mlResults = await _indexer.SearchAsync(_indexPath, "machine learning", SearchMode.Bm25, 10, null);
-        var dsResults = await _indexer.SearchAsync(_indexPath, "data science", SearchMode.Bm25, 10, null);
+        var aiResults = await _searchService.SearchAsync(_indexPath, "artificial intelligence", SearchMode.Bm25, 10, null);
+        var mlResults = await _searchService.SearchAsync(_indexPath, "machine learning", SearchMode.Bm25, 10, null);
+        var dsResults = await _searchService.SearchAsync(_indexPath, "data science", SearchMode.Bm25, 10, null);
 
         // Should find content from .txt files
         aiResults.Should().HaveCountGreaterThan(0);
@@ -287,7 +289,7 @@ Document about cats and dogs together.";
         dsResults.Should().HaveCountGreaterThan(0);
 
         // Should not find content from unsupported .json file
-        var jsonResults = await _indexer.SearchAsync(_indexPath, "key", SearchMode.Bm25, 10, null);
+        var jsonResults = await _searchService.SearchAsync(_indexPath, "key", SearchMode.Bm25, 10, null);
         jsonResults.Should().BeEmpty();
     }
 
@@ -304,11 +306,11 @@ Document about cats and dogs together.";
         await File.WriteAllTextAsync(rootFile, "Root level document about quantum computing.");
         await File.WriteAllTextAsync(nestedFile, "Nested document about blockchain technology.");
 
-        await _indexer.IngestFolderAsync(_indexPath, folderPath);
+        await _ingester.IngestFolderAsync(_indexPath, folderPath);
 
         // Should find both root and nested files
-        var quantumResults = await _indexer.SearchAsync(_indexPath, "quantum computing", SearchMode.Bm25, 10, null);
-        var blockchainResults = await _indexer.SearchAsync(_indexPath, "blockchain", SearchMode.Bm25, 10, null);
+        var quantumResults = await _searchService.SearchAsync(_indexPath, "quantum computing", SearchMode.Bm25, 10, null);
+        var blockchainResults = await _searchService.SearchAsync(_indexPath, "blockchain", SearchMode.Bm25, 10, null);
 
         quantumResults.Should().HaveCountGreaterThan(0);
         blockchainResults.Should().HaveCountGreaterThan(0);
@@ -319,7 +321,7 @@ Document about cats and dogs together.";
     {
         var nonExistentFolder = Path.Combine(_testDirectory, "nonexistent-folder");
 
-        var act = async () => await _indexer.IngestFolderAsync(_indexPath, nonExistentFolder);
+        var act = async () => await _ingester.IngestFolderAsync(_indexPath, nonExistentFolder);
 
         await act.Should().ThrowAsync<DirectoryNotFoundException>()
             .WithMessage($"Folder not found: {nonExistentFolder}");
@@ -332,13 +334,13 @@ Document about cats and dogs together.";
         Directory.CreateDirectory(emptyFolder);
 
         // Should not throw, just handle gracefully
-        await _indexer.IngestFolderAsync(_indexPath, emptyFolder);
+        await _ingester.IngestFolderAsync(_indexPath, emptyFolder);
 
         // Index should not be created if no files were ingested
         // Or if created, should be empty
         if (Directory.Exists(_indexPath))
         {
-            var results = await _indexer.SearchAsync(_indexPath, "anything", SearchMode.Bm25, 10, null);
+            var results = await _searchService.SearchAsync(_indexPath, "anything", SearchMode.Bm25, 10, null);
             results.Should().BeEmpty();
         }
     }
