@@ -4,6 +4,23 @@
 
 A .NET 9.0 CLI tool (`pbrag`) for Retrieval-Augmented Generation (RAG) that provides BM25, vector, and hybrid search over document indices. Designed for use as an MCP server for AI assistants like Claude.
 
+### Architectural Boundary
+
+**This is an MCP server.** We provide search capabilities; the LLM is the client.
+
+**Our responsibilities:**
+- Index documents (chunks, embeddings, BM25)
+- Execute search queries efficiently
+- Return ranked results
+
+**NOT our responsibilities:**
+- Query formulation (LLM client does this)
+- Result synthesis (LLM client does this)
+- Multi-hop reasoning (LLM client does this)
+- LLM inference costs (client's concern)
+
+**Implication for development:** When evaluating search quality or costs, focus on the retrieval operation itself. Don't optimize for "how an LLM might use this" - that's the client's job. We provide fast, accurate document retrieval.
+
 ## Quick Reference
 
 ```bash

@@ -1,5 +1,25 @@
 # PBRAG Search Mode Evaluation
 
+## Evaluation Scope
+
+**This project is an MCP server.** We provide search capabilities; the LLM client uses them.
+
+**What we evaluate:**
+- Document retrieval quality (precision, recall)
+- Search latency (index → results)
+- Per-query costs (API calls this server makes)
+- Storage/indexing costs
+
+**What we DON'T evaluate:**
+- LLM query formulation (happens client-side)
+- LLM result synthesis (happens client-side)
+- LLM inference costs (client's responsibility)
+- End-to-end RAG latency (client orchestrates this)
+
+**Cost accounting:** When we say "cost per query", we mean the cost of executing the search operation, NOT the cost of the LLM using that search. Vector search costs $0.0001/query because we call the embedding API. BM25 costs $0 because it's local. What the LLM client does with results is out of scope.
+
+---
+
 ## Test Methodology
 
 **Corpus:** 2 H.P. Lovecraft short stories (~180KB text)
@@ -30,7 +50,6 @@
 | **BM25** | ~10ms | $0 | ★★☆☆☆ | ★★★★★ |
 | **Vector** | ~650ms | $0.10 | ★★★★★ | ★★★★☆ |
 | **Hybrid** | ~650ms | $0.10 | ★★★★★ | ★★★★★ |
-| **LLM→BM25** | ~1.5s | $3.00 | ★★★★★ | ★★★★★ |
 
 ### Key Findings
 
@@ -39,12 +58,7 @@
 - "Strange colors otherworldly phenomena" → Found "colour out of space" descriptions
 - Query phrasing (natural vs keywords) doesn't matter for quality
 
-**2. BM25 with LLM Keyword Extraction Matches Vector Quality**
-- LLM can reformulate queries into optimal keywords
-- "fright fear terror sailors perished" (LLM-optimized) matches vector semantic results
-- BUT: 30x more expensive than embeddings ($3.00 vs $0.10 per 1K queries)
-
-**3. Hybrid Search Combines Best of Both Worlds**
+**2. Hybrid Search Combines Best of Both Worlds**
 - Gets exact matches from BM25 + semantic results from vector
 - Same cost as vector-only (~$0.10 per 1K queries)
 - Most robust across all query types
@@ -53,75 +67,99 @@
 
 ## Cost Analysis
 
-### Per-Query Economics
+### Per-Query Economics (MCP Server Perspective)
+
+**BM25 Search:**
+```
+Lucene index lookup: $0/query
+No external API calls, pure local computation
+```
 
 **Vector Search:**
 ```
-Embedding API call: $0.0001/query
-Pre-computed intelligence, reused for every query
+Embedding API call: $0.0001/query (text-embedding-3-large)
+Pre-computed chunk embeddings at index time
+Query embedding generated per search
 ```
 
-**LLM Keyword Extraction:**
+**Hybrid Search:**
 ```
-LLM inference: $0.003/query (Sonnet 4.5)
-Per-query intelligence, paid every time
+BM25 lookup + Vector lookup: $0.0001/query
+Same cost as vector-only (BM25 is free)
 ```
 
 ### At Scale (1M queries)
 
-| Approach | Total Cost | Why |
-|----------|-----------|-----|
-| Vector | $100 | Embeddings are cheap, pre-computed |
-| LLM→BM25 | $3,000 | LLM inference per query is expensive |
-| Hybrid | $100 | Same as vector |
+| Approach | Total Cost | Latency |
+|----------|-----------|---------|
+| BM25 | $0 | ~10ms |
+| Vector | $100 | ~650ms |
+| Hybrid | $100 | ~650ms |
 
-**Conclusion:** Embeddings are the "compiled" version of semantic understanding. Pre-computation beats per-query LLM calls.
+**Note:** LLM costs (query formulation, result synthesis) are NOT included - those happen client-side and are not this MCP server's responsibility.
 
 ---
 
 ## Recommendations
 
-### For RAG Applications with LLM Backend
+### MCP Server Search Mode Selection
+
+This is an MCP server - the LLM client is responsible for query formulation and result synthesis. Our job is to return relevant documents efficiently.
 
 **✅ Default: Hybrid Search (BM25 + Vector)**
-- Best quality across all query types
-- Reasonable cost ($0.10 per 1K queries)
+- Best retrieval quality across all query types
+- $0.10 per 1K queries
 - 650ms average latency
-- Let LLM focus on synthesis, not keyword extraction
+- Handles both precise term matching and semantic similarity
 
-**✅ Cost-Optimized: Vector Only**
-- Excellent semantic quality
-- 30x cheaper than LLM keyword extraction
-- Use when semantic understanding is primary need
-
-**✅ Speed-Critical: BM25 Only**
-- 10ms latency
+**✅ Technical Documentation: BM25 Only**
+- 10ms latency (65x faster than hybrid)
 - Zero query cost
-- Use for autocomplete, previews, high-frequency exact-match queries
+- Excellent for reference docs with precise terminology
+- LLM clients already formulate keyword-rich queries
 
-**✅ No-Index: LLM + BM25**
-- Acceptable for low-volume applications (<100 queries/day)
-- Use when you can't or won't build embeddings
-- Higher per-query cost but zero index cost
+**✅ Natural Language Content: Vector or Hybrid**
+- Better for narrative content with varied phrasing
+- Embeddings capture semantic relationships
+- Use when exact terminology varies across documents
 
-### LLM Role in RAG Should Be:
-1. Understanding user intent
-2. Ranking and synthesizing search results
-3. Multi-hop reasoning
-4. Answer generation
+### Architectural Boundary
 
-**NOT** keyword extraction - embeddings handle this cheaper and faster.
+**MCP Server responsibilities (us):**
+- Index documents efficiently
+- Return relevant chunks for search queries
+- Provide fast, low-cost retrieval
+
+**LLM Client responsibilities (not us):**
+- Understand user intent
+- Formulate search queries
+- Synthesize results into answers
+- Multi-hop reasoning
+
+**Cost accounting:** LLM inference costs are the client's concern. We optimize for retrieval quality, latency, and per-query search costs only.
 
 ---
 
-## When LLM Keyword Extraction Makes Sense
+## When to Choose Each Search Mode
 
-Valid use cases exist:
-- **Domain-specific reformulation:** "myocardial infarction" → "heart attack"
-- **Query expansion:** Generate synonym variants
-- **Filtering/faceting:** Extract structured search constraints
-- **Temporal queries:** "Recent research" → add date filters
-- **Iterative refinement:** Multi-step search based on results
+### Use BM25 when:
+- Queries contain precise technical terms
+- Content uses standardized terminology
+- Speed is critical (<10ms latency needed)
+- Cost must be zero (high query volume)
+- LLM clients formulate keyword-rich queries
+
+### Use Vector when:
+- Content uses varied phrasing for same concepts
+- Semantic similarity matters more than exact matches
+- Natural language queries from end users
+- Cross-document conceptual relationships important
+
+### Use Hybrid when:
+- Mixed query types (both precise and semantic)
+- Maximum recall required
+- Moderate latency acceptable (~650ms)
+- Budget allows $0.10 per 1K queries
 
 ---
 
@@ -153,8 +191,15 @@ pbrag query --index-path ./index --search-mode bm25 \
 
 ## Bottom Line
 
-**For production RAG with LLMs: Use Hybrid search.**
-- 30x cheaper than LLM keyword extraction
-- Faster (650ms vs 1.5s)
-- Equal or better quality
-- Let the LLM do what it's good at: reasoning and synthesis, not search query optimization
+**Default recommendation: Hybrid search**
+- Best retrieval quality across query types
+- Reasonable cost ($0.10 per 1K queries)
+- 650ms latency acceptable for most use cases
+
+**For technical documentation with LLM clients: Consider BM25-only**
+- 65x faster (10ms vs 650ms)
+- Zero cost
+- Equivalent quality when LLM formulates keyword-rich queries
+- See `docs/bm25-vs-hybrid-analysis.md` for detailed analysis
+
+**This is an MCP server.** Focus on fast, accurate document retrieval. Let LLM clients handle query formulation and result synthesis.
