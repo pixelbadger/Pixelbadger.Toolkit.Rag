@@ -16,8 +16,8 @@ public class LuceneRepository : ILuceneRepository
 
     public async Task IndexWithLuceneAsync(string indexPath, string contentPath, List<IChunk> chunks)
     {
-        var indexDirectory = FSDirectory.Open(indexPath);
-        var analyzer = new StandardAnalyzer(LUCENE_VERSION);
+        using var indexDirectory = FSDirectory.Open(indexPath);
+        using var analyzer = new StandardAnalyzer(LUCENE_VERSION);
         var config = new IndexWriterConfig(LUCENE_VERSION, analyzer);
 
         // Ensure consistent BM25 similarity for both indexing and searching
@@ -45,9 +45,6 @@ public class LuceneRepository : ILuceneRepository
         }
 
         writer.Commit();
-        writer.Dispose();
-        indexDirectory.Dispose();
-        analyzer.Dispose();
     }
 
     public Task<List<SearchResult>> QueryLuceneAsync(string indexPath, string queryText, int maxResults, string[]? sourceIds)
@@ -58,8 +55,8 @@ public class LuceneRepository : ILuceneRepository
         }
 
         var results = new List<SearchResult>();
-        var indexDirectory = FSDirectory.Open(indexPath);
-        var analyzer = new StandardAnalyzer(LUCENE_VERSION);
+        using var indexDirectory = FSDirectory.Open(indexPath);
+        using var analyzer = new StandardAnalyzer(LUCENE_VERSION);
 
         using var reader = DirectoryReader.Open(indexDirectory);
         var searcher = new IndexSearcher(reader);
@@ -68,7 +65,17 @@ public class LuceneRepository : ILuceneRepository
         searcher.Similarity = new BM25Similarity();
 
         var parser = new QueryParser(LUCENE_VERSION, "content", analyzer);
-        var contentQuery = parser.Parse(queryText);
+
+        Query contentQuery;
+        try
+        {
+            contentQuery = parser.Parse(queryText);
+        }
+        catch (ParseException)
+        {
+            // If the query contains invalid Lucene syntax, escape it and retry as a literal search
+            contentQuery = parser.Parse(QueryParser.Escape(queryText));
+        }
 
         Query finalQuery;
         if (sourceIds != null && sourceIds.Length > 0)
@@ -109,10 +116,6 @@ public class LuceneRepository : ILuceneRepository
             };
             results.Add(result);
         }
-
-        reader.Dispose();
-        indexDirectory.Dispose();
-        analyzer.Dispose();
 
         return Task.FromResult(results);
     }

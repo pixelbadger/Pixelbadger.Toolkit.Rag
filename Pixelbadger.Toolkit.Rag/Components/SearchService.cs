@@ -29,12 +29,12 @@ public class SearchService : ISearchService
         };
     }
 
-    public async Task<List<SearchResult>> VectorQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
+    private async Task<List<SearchResult>> VectorQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
     {
         return await _vectorRepo.QueryVectorsAsync(indexPath, queryText, maxResults, sourceIds);
     }
 
-    public async Task<List<SearchResult>> HybridQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
+    private async Task<List<SearchResult>> HybridQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
     {
         // Fetch more results from each search to improve fusion quality
         var fetchCount = Math.Max(maxResults * 2, 20);
