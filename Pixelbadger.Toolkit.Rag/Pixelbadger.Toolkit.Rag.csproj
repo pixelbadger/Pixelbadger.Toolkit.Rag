@@ -10,7 +10,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>pbrag</ToolCommandName>
     <PackageId>Pixelbadger.Toolkit.Rag</PackageId>
-    <Version>1.3.0</Version>
+    <Version>1.4.0</Version>
     <Authors>Pixelbadger</Authors>
     <Description>A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 search indexing, querying, semantic chunking, and MCP server functionality powered by Lucene.NET.</Description>
     <PackageTags>cli;toolkit;rag;search;lucene;mcp;bm25;semantic;embeddings;chunking</PackageTags>

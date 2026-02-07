@@ -36,7 +36,8 @@ public class ContentIngester : IContentIngester
 
         options ??= new IngestOptions();
 
-        var content = await File.ReadAllTextAsync(contentPath);
+        var fileReader = _fileReaderFactory.GetReader(contentPath);
+        var content = await fileReader.ReadTextAsync(contentPath);
         var chunks = await GetChunksForFileAsync(contentPath, content);
 
         // Filter out empty chunks
@@ -45,8 +46,11 @@ public class ContentIngester : IContentIngester
         // Lucene BM25 indexing
         await _luceneRepo.IndexWithLuceneAsync(indexPath, contentPath, nonEmptyChunks);
 
-        // Vector storage (always enabled for eval harness)
-        await _vectorRepo.StoreVectorsAsync(indexPath, contentPath, nonEmptyChunks);
+        // Vector storage
+        if (options.EnableVectorStorage)
+        {
+            await _vectorRepo.StoreVectorsAsync(indexPath, contentPath, nonEmptyChunks);
+        }
     }
 
     public async Task IngestFolderAsync(string indexPath, string folderPath, IngestOptions? options = null)
@@ -102,7 +106,10 @@ public class ContentIngester : IContentIngester
                 await _luceneRepo.IndexWithLuceneAsync(indexPath, filePath, nonEmptyChunks);
 
                 // Vector storage
-                await _vectorRepo.StoreVectorsAsync(indexPath, filePath, nonEmptyChunks);
+                if (options.EnableVectorStorage)
+                {
+                    await _vectorRepo.StoreVectorsAsync(indexPath, filePath, nonEmptyChunks);
+                }
 
                 Console.WriteLine($"  Indexed {nonEmptyChunks.Count} chunks from {Path.GetFileName(filePath)}");
             }
