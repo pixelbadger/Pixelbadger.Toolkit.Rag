@@ -94,6 +94,83 @@ public class SearchIndexerTests : IDisposable
             .WithMessage($"Index directory not found: {nonExistentIndex}");
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(SearchService.MaxResultsLimit + 1)]
+    public async Task SearchAsync_ShouldRejectInvalidMaxResults(int maxResults)
+    {
+        var act = async () => await _searchService.SearchAsync(_indexPath, "test", SearchMode.Bm25, maxResults, null);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>()
+            .WithMessage($"maxResults must be between 1 and {SearchService.MaxResultsLimit}*");
+    }
+
+    [Fact]
+    public async Task SearchAsync_ShouldRejectBlankQuery()
+    {
+        var act = async () => await _searchService.SearchAsync(_indexPath, "   ", SearchMode.Bm25, 10, null);
+
+        await act.Should().ThrowAsync<ArgumentException>()
+            .WithMessage("Query is required*");
+    }
+
+    [Fact]
+    public async Task SearchAsync_ShouldRejectOverlongQuery()
+    {
+        var query = new string('a', SearchService.MaxQueryLength + 1);
+
+        var act = async () => await _searchService.SearchAsync(_indexPath, query, SearchMode.Bm25, 10, null);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>()
+            .WithMessage($"Query length cannot exceed {SearchService.MaxQueryLength} characters*");
+    }
+
+    [Fact]
+    public async Task SearchAsync_ShouldRejectTooManySourceIds()
+    {
+        var sourceIds = Enumerable.Repeat("source", SearchService.MaxSourceIds + 1).ToArray();
+
+        var act = async () => await _searchService.SearchAsync(_indexPath, "test", SearchMode.Bm25, 10, sourceIds);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>()
+            .WithMessage($"sourceIds cannot contain more than {SearchService.MaxSourceIds} entries*");
+    }
+
+    [Fact]
+    public async Task SearchAsync_ShouldRejectInvalidSourceIdValues()
+    {
+        var sourceIds = new[] { "valid", " " };
+
+        var act = async () => await _searchService.SearchAsync(_indexPath, "test", SearchMode.Bm25, 10, sourceIds);
+
+        await act.Should().ThrowAsync<ArgumentException>()
+            .WithMessage("sourceIds cannot contain empty values*");
+    }
+
+    [Fact]
+    public async Task SearchAsync_ShouldRejectOverlongSourceIdValues()
+    {
+        var sourceIds = new[] { new string('a', SearchService.MaxSourceIdLength + 1) };
+
+        var act = async () => await _searchService.SearchAsync(_indexPath, "test", SearchMode.Bm25, 10, sourceIds);
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>()
+            .WithMessage($"sourceIds entries cannot exceed {SearchService.MaxSourceIdLength} characters*");
+    }
+
+    [Fact]
+    public async Task SearchAsync_ShouldTreatLuceneSyntaxAsLiteralText()
+    {
+        var contentFile = Path.Combine(_testDirectory, "content.txt");
+        await File.WriteAllTextAsync(contentFile, "Alpha document.\n\nBeta document.");
+
+        await _ingester.IngestContentAsync(_indexPath, contentFile);
+        var results = await _searchService.SearchAsync(_indexPath, "*", SearchMode.Bm25, 10, null);
+
+        results.Should().BeEmpty();
+    }
+
     [Fact]
     public async Task SearchAsync_ShouldReturnEmptyResults_WhenNoMatchingContent()
     {
@@ -325,6 +402,81 @@ Document about cats and dogs together.";
 
         await act.Should().ThrowAsync<DirectoryNotFoundException>()
             .WithMessage($"Folder not found: {nonExistentFolder}");
+    }
+
+    [Fact]
+    public async Task IngestContentAsync_ShouldRejectFilesOverConfiguredLimit()
+    {
+        var contentFile = Path.Combine(_testDirectory, "content.txt");
+        await File.WriteAllTextAsync(contentFile, "oversized content");
+
+        var options = new IngestOptions { MaxFileSizeBytes = 4 };
+
+        var act = async () => await _ingester.IngestContentAsync(_indexPath, contentFile, options);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("File*exceeding the limit*");
+    }
+
+    [Fact]
+    public async Task IngestContentAsync_ShouldRejectChunksOverConfiguredLimit()
+    {
+        var contentFile = Path.Combine(_testDirectory, "content.txt");
+        await File.WriteAllTextAsync(contentFile, "this chunk is too long");
+
+        var options = new IngestOptions { MaxChunkCharacters = 4 };
+
+        var act = async () => await _ingester.IngestContentAsync(_indexPath, contentFile, options);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("File*produced a chunk*exceeding the limit*");
+    }
+
+    [Fact]
+    public async Task IngestFolderAsync_ShouldRejectFoldersOverConfiguredFileLimit()
+    {
+        var folderPath = Path.Combine(_testDirectory, "corpus");
+        Directory.CreateDirectory(folderPath);
+        await File.WriteAllTextAsync(Path.Combine(folderPath, "one.txt"), "first document");
+        await File.WriteAllTextAsync(Path.Combine(folderPath, "two.txt"), "second document");
+
+        var options = new IngestOptions { MaxFiles = 1 };
+
+        var act = async () => await _ingester.IngestFolderAsync(_indexPath, folderPath, options);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Folder contains 2 supported files, exceeding the limit of 1");
+    }
+
+    [Fact]
+    public async Task IngestFolderAsync_ShouldSkipSymlinkedFilesByDefault()
+    {
+        var folderPath = Path.Combine(_testDirectory, "corpus");
+        Directory.CreateDirectory(folderPath);
+
+        var publicFile = Path.Combine(folderPath, "public.txt");
+        var secretFile = Path.Combine(_testDirectory, "secret.txt");
+        var linkedFile = Path.Combine(folderPath, "linked-secret.txt");
+
+        await File.WriteAllTextAsync(publicFile, "public searchable content");
+        await File.WriteAllTextAsync(secretFile, "secret off root content");
+
+        try
+        {
+            File.CreateSymbolicLink(linkedFile, secretFile);
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        await _ingester.IngestFolderAsync(_indexPath, folderPath);
+
+        var publicResults = await _searchService.SearchAsync(_indexPath, "public", SearchMode.Bm25, 10, null);
+        var secretResults = await _searchService.SearchAsync(_indexPath, "secret", SearchMode.Bm25, 10, null);
+
+        publicResults.Should().HaveCountGreaterThan(0);
+        secretResults.Should().BeEmpty();
     }
 
     [Fact]

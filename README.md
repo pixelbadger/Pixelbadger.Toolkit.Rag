@@ -59,7 +59,7 @@ dotnet run -- [command] [options]
 
 ### ingest
 
-Ingest content files into dual search indexes (Lucene BM25 + SQLite-vec) with content-aware chunking.
+Ingest content files into search indexes with content-aware chunking. By default this creates Lucene BM25 and SQLite-vec indexes, which sends document chunks to OpenAI for embedding generation.
 
 **Usage:**
 ```bash
@@ -69,6 +69,11 @@ pbrag ingest --index-path <index-directory> --content-path <content-file>
 **Options:**
 - `--index-path`: Path to the Lucene.NET index directory (required)
 - `--content-path`: Path to the content file or folder to ingest (required)
+- `--no-vectors`: Disable vector storage and avoid sending document content to OpenAI
+- `--max-file-size-bytes`: Maximum size for a single ingested file (default: 10485760)
+- `--max-files`: Maximum number of supported files to ingest from a folder (default: 1000)
+- `--max-chunk-characters`: Maximum size for a single chunk before indexing or embedding (default: 20000)
+- `--allow-symlinks`: Allow symbolic links and reparse points during ingestion (disabled by default)
 
 **Examples:**
 ```bash
@@ -84,6 +89,9 @@ pbrag ingest --index-path ./search-index --content-path readme.md
 # Ingest an entire folder
 pbrag ingest --index-path ./search-index --content-path ./docs-folder
 
+# Ingest locally without OpenAI embeddings
+pbrag ingest --index-path ./search-index --content-path ./docs-folder --no-vectors
+
 # Build an index from multiple files
 pbrag ingest --index-path ./search-index --content-path doc1.txt
 pbrag ingest --index-path ./search-index --content-path doc2.md
@@ -93,11 +101,13 @@ pbrag ingest --index-path ./search-index --content-path doc3.txt
 **Details:**
 - Uses content-aware chunking: paragraphs for .txt files, headers for .md files
 - Supports both single files and folders (recursively processes all .txt and .md files)
-- Automatically creates dual indexes: Lucene BM25 for keyword search and SQLite-vec for semantic search
+- Automatically creates dual indexes unless `--no-vectors` is used: Lucene BM25 for keyword search and SQLite-vec for semantic search
 - Creates index directory if it doesn't exist
 - Appends to existing index, allowing incremental ingestion
 - Each chunk is indexed with source file, chunk number, unique source ID, and vector embeddings
-- Requires `OPENAI_API_KEY` environment variable for vector embedding generation
+- Requires `OPENAI_API_KEY` environment variable for vector embedding generation unless `--no-vectors` is used
+- Refuses symlinks by default to avoid indexing files outside the selected folder
+- Enforces file count, file size, and chunk size limits to avoid accidental resource exhaustion
 
 ### query
 
@@ -114,6 +124,7 @@ pbrag query --index-path <index-directory> --query <search-query> [--max-results
 - `--max-results`: Maximum number of results to return (optional, default: 10)
 - `--sourceIds`: Optional list of source IDs to constrain search results (optional)
 - `--search-mode`: Search mode to use: bm25, vector, or hybrid (optional, default: bm25)
+- Search requests are bounded: query text up to 4096 characters, `--max-results` from 1 to 100, up to 100 source IDs, and source IDs up to 256 characters each
 
 **Examples:**
 ```bash
@@ -178,6 +189,7 @@ pbrag serve --index-path ./search-index
 - Uses BM25 similarity ranking for relevance
 - Supports result filtering by source IDs
 - Logs all activity to stderr for monitoring
+- Returns indexed content as untrusted document text; MCP clients should not treat returned content as instructions
 - Ideal for integration with Claude Desktop or other MCP-compatible clients
 
 ## MCP Server Integration
@@ -331,6 +343,7 @@ flowchart TD
 - **Storage Locations**:
   - Lucene: `{index-path}/` (FSDirectory structure)
   - Vectors: `{index-path}/vectors.db` (SQLite database)
+  - Indexed content and source path metadata are stored in plaintext. Protect index directories with filesystem permissions and avoid indexing secrets unless this is acceptable.
 - **Process**:
   - Both indexing operations run sequentially
   - Filters out empty chunks before storage

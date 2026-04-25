@@ -29,12 +29,15 @@ public class ContentIngester : IContentIngester
 
     public async Task IngestContentAsync(string indexPath, string contentPath, IngestOptions? options)
     {
+        options ??= new IngestOptions();
+
         if (!File.Exists(contentPath))
         {
             throw new FileNotFoundException($"Content file not found: {contentPath}");
         }
 
-        options ??= new IngestOptions();
+        ValidateIngestOptions(options);
+        ValidateFileForIngestion(contentPath, options);
 
         var fileReader = _fileReaderFactory.GetReader(contentPath);
         var content = await fileReader.ReadTextAsync(contentPath);
@@ -42,6 +45,7 @@ public class ContentIngester : IContentIngester
 
         // Filter out empty chunks
         var nonEmptyChunks = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
+        ValidateChunksForIngestion(contentPath, nonEmptyChunks, options);
 
         // Lucene BM25 indexing
         await _luceneRepo.IndexWithLuceneAsync(indexPath, contentPath, nonEmptyChunks);
@@ -55,18 +59,31 @@ public class ContentIngester : IContentIngester
 
     public async Task IngestFolderAsync(string indexPath, string folderPath, IngestOptions? options = null)
     {
+        options ??= new IngestOptions();
+
         if (!Directory.Exists(folderPath))
         {
             throw new DirectoryNotFoundException($"Folder not found: {folderPath}");
         }
 
-        options ??= new IngestOptions();
+        ValidateIngestOptions(options);
 
-        // Discover all files in the folder
-        var allFiles = Directory.GetFiles(folderPath, "*.*", SearchOption.AllDirectories);
+        if (!options.AllowSymlinks && IsReparsePoint(folderPath))
+        {
+            throw new InvalidOperationException($"Refusing to ingest symbolic link or reparse point folder: {folderPath}");
+        }
+
+        var rootPath = NormalizeRootPath(Path.GetFullPath(folderPath));
+
+        // Discover files without following symlinked directories by default.
+        var allFiles = EnumerateFilesSafely(rootPath, options).ToList();
 
         // Filter to only supported file types
         var supportedFiles = allFiles.Where(file => _fileReaderFactory.CanRead(file)).ToList();
+        if (supportedFiles.Count > options.MaxFiles)
+        {
+            throw new InvalidOperationException($"Folder contains {supportedFiles.Count} supported files, exceeding the limit of {options.MaxFiles}");
+        }
 
         if (supportedFiles.Count == 0)
         {
@@ -83,6 +100,8 @@ public class ContentIngester : IContentIngester
             try
             {
                 Console.WriteLine($"Ingesting: {Path.GetFileName(filePath)}");
+                ValidateFileWithinRoot(filePath, rootPath);
+                ValidateFileForIngestion(filePath, options);
 
                 // Get the appropriate reader for this file
                 var reader = _fileReaderFactory.GetReader(filePath);
@@ -95,6 +114,7 @@ public class ContentIngester : IContentIngester
 
                 // Filter out empty chunks
                 var nonEmptyChunks = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
+                ValidateChunksForIngestion(filePath, nonEmptyChunks, options);
 
                 if (nonEmptyChunks.Count == 0)
                 {
@@ -127,5 +147,98 @@ public class ContentIngester : IContentIngester
     {
         var chunker = _chunkerFactory.GetChunker(filePath);
         return await chunker.ChunkTextAsync(content);
+    }
+
+    private static IEnumerable<string> EnumerateFilesSafely(string rootPath, IngestOptions options)
+    {
+        var pendingDirectories = new Stack<string>();
+        pendingDirectories.Push(rootPath);
+
+        while (pendingDirectories.Count > 0)
+        {
+            var currentDirectory = pendingDirectories.Pop();
+
+            foreach (var directory in Directory.EnumerateDirectories(currentDirectory))
+            {
+                if (!options.AllowSymlinks && IsReparsePoint(directory))
+                {
+                    continue;
+                }
+
+                pendingDirectories.Push(directory);
+            }
+
+            foreach (var file in Directory.EnumerateFiles(currentDirectory))
+            {
+                if (!options.AllowSymlinks && IsReparsePoint(file))
+                {
+                    continue;
+                }
+
+                yield return file;
+            }
+        }
+    }
+
+    private static void ValidateIngestOptions(IngestOptions options)
+    {
+        if (options.MaxFileSizeBytes < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxFileSizeBytes must be greater than zero");
+        }
+
+        if (options.MaxFiles < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxFiles must be greater than zero");
+        }
+
+        if (options.MaxChunkCharacters < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxChunkCharacters must be greater than zero");
+        }
+    }
+
+    private static void ValidateFileForIngestion(string filePath, IngestOptions options)
+    {
+        if (!options.AllowSymlinks && IsReparsePoint(filePath))
+        {
+            throw new InvalidOperationException($"Refusing to ingest symbolic link or reparse point file: {filePath}");
+        }
+
+        var fileInfo = new FileInfo(filePath);
+        if (fileInfo.Length > options.MaxFileSizeBytes)
+        {
+            throw new InvalidOperationException($"File '{filePath}' is {fileInfo.Length} bytes, exceeding the limit of {options.MaxFileSizeBytes} bytes");
+        }
+    }
+
+    private static void ValidateChunksForIngestion(string filePath, List<IChunk> chunks, IngestOptions options)
+    {
+        var oversizedChunk = chunks.FirstOrDefault(chunk => chunk.Content.Length > options.MaxChunkCharacters);
+        if (oversizedChunk != null)
+        {
+            throw new InvalidOperationException($"File '{filePath}' produced a chunk with {oversizedChunk.Content.Length} characters, exceeding the limit of {options.MaxChunkCharacters} characters");
+        }
+    }
+
+    private static void ValidateFileWithinRoot(string filePath, string rootPath)
+    {
+        var fullPath = Path.GetFullPath(filePath);
+        if (!fullPath.StartsWith(rootPath, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"Refusing to ingest file outside folder root: {filePath}");
+        }
+    }
+
+    private static bool IsReparsePoint(string path)
+    {
+        return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
+    }
+
+    private static string NormalizeRootPath(string rootPath)
+    {
+        return rootPath.EndsWith(Path.DirectorySeparatorChar)
+            ? rootPath
+            : rootPath + Path.DirectorySeparatorChar;
     }
 }

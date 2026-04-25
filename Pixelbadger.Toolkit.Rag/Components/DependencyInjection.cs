@@ -90,7 +90,7 @@ public static class DependencyInjection
         services.AddTransient<ChunkerFactory>();
 
         services.AddTransient<ILuceneRepository, LuceneRepository>();
-        services.AddTransient<IVectorRepository, VectorRepository>();
+        services.AddTransient<IVectorRepository>(sp => new VectorRepository(() => sp.GetRequiredService<IEmbeddingService>()));
         services.AddTransient<IReranker, RrfReranker>();
 
         // Register file readers

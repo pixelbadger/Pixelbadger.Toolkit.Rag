@@ -8,18 +8,23 @@ namespace Pixelbadger.Toolkit.Rag.Components;
 /// Vector repository backed by SQLite-vec for storing and searching chunk embeddings.
 /// Generates embeddings for chunks during storage and for query text at search time.
 /// </summary>
-public class VectorRepository : IVectorRepository, IAsyncDisposable
+public class VectorRepository : IVectorRepository, IDisposable
 {
     private const string CollectionName = "chunks";
-    private readonly IEmbeddingService _embeddingService;
+    private readonly Func<IEmbeddingService> _embeddingServiceFactory;
     private string? _currentIndexPath;
     private SqliteVectorStore? _vectorStore;
     private SqliteCollection<string, ChunkVectorRecord>? _collection;
     private bool _initialized;
 
     public VectorRepository(IEmbeddingService embeddingService)
+        : this(() => embeddingService)
     {
-        _embeddingService = embeddingService;
+    }
+
+    public VectorRepository(Func<IEmbeddingService> embeddingServiceFactory)
+    {
+        _embeddingServiceFactory = embeddingServiceFactory;
     }
 
     private string GetDatabasePath(string indexPath) => Path.Combine(indexPath, "vectors.db");
@@ -36,7 +41,7 @@ public class VectorRepository : IVectorRepository, IAsyncDisposable
         // Dispose existing resources if switching paths
         if (_initialized && _currentIndexPath != indexPath)
         {
-            await DisposeAsync();
+            Dispose();
         }
 
         var databasePath = GetDatabasePath(indexPath);
@@ -69,7 +74,7 @@ public class VectorRepository : IVectorRepository, IAsyncDisposable
         foreach (var chunk in chunks)
         {
             // Generate embedding for this chunk's content
-            var embedding = await _embeddingService.GenerateEmbeddingAsync(chunk.Content);
+            var embedding = await _embeddingServiceFactory().GenerateEmbeddingAsync(chunk.Content);
 
             var record = new ChunkVectorRecord
             {
@@ -104,7 +109,7 @@ public class VectorRepository : IVectorRepository, IAsyncDisposable
         await InitializeAsync(indexPath);
 
         // Generate embedding for the query text
-        var queryEmbedding = await _embeddingService.GenerateEmbeddingAsync(queryText);
+        var queryEmbedding = await _embeddingServiceFactory().GenerateEmbeddingAsync(queryText);
 
         // Build search options with filter if needed
         VectorSearchOptions<ChunkVectorRecord>? searchOptions = null;
@@ -145,12 +150,11 @@ public class VectorRepository : IVectorRepository, IAsyncDisposable
         return File.Exists(databasePath);
     }
 
-    public ValueTask DisposeAsync()
+    public void Dispose()
     {
         _vectorStore = null;
         _collection = null;
         _initialized = false;
         _currentIndexPath = null;
-        return ValueTask.CompletedTask;
     }
 }

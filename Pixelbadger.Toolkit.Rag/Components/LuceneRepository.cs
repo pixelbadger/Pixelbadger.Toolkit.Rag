@@ -66,16 +66,7 @@ public class LuceneRepository : ILuceneRepository
 
         var parser = new QueryParser(LUCENE_VERSION, "content", analyzer);
 
-        Query contentQuery;
-        try
-        {
-            contentQuery = parser.Parse(queryText);
-        }
-        catch (ParseException)
-        {
-            // If the query contains invalid Lucene syntax, escape it and retry as a literal search
-            contentQuery = parser.Parse(QueryParser.Escape(queryText));
-        }
+        var contentQuery = parser.Parse(QueryParser.Escape(queryText));
 
         Query finalQuery;
         if (sourceIds != null && sourceIds.Length > 0)
