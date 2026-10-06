@@ -40,9 +40,6 @@ public static class IngestEndpoints
         if (bodyLimit is { IsReadOnly: false })
             bodyLimit.MaxRequestBodySize = settings.MaxRequestBodyBytes;
 
-        if (!request.HasFormContentType)
-            return Results.Problem("The request must be multipart/form-data.", statusCode: StatusCodes.Status400BadRequest);
-
         IFormCollection form;
         try
         {
@@ -50,8 +47,10 @@ public static class IngestEndpoints
         }
         catch (Exception ex) when (ex is InvalidDataException or BadHttpRequestException { StatusCode: StatusCodes.Status400BadRequest })
         {
-            // Malformed multipart, or a part larger than the per-file limit.
-            return Results.Problem($"The multipart body could not be read: {ex.Message}", statusCode: StatusCodes.Status400BadRequest);
+            // Malformed multipart, or a part larger than the per-file limit (FormOptions.MultipartBodyLengthLimit).
+            return Results.Problem(
+                $"The multipart body could not be read: {ex.Message} Each file may be at most {settings.MaxFileSizeBytes} bytes.",
+                statusCode: StatusCodes.Status400BadRequest);
         }
 
         var files = form.Files.GetFiles(FilesField);

@@ -102,14 +102,14 @@ public sealed class SqlIngestQueue : IIngestQueue
             SET Status = @fileFailed, Content = NULL, Error = N'The job failed before this file was processed.'
             WHERE JobId IN (SELECT Id FROM @dead) AND Status = @fileQueued;
 
-            ;WITH next AS (
+            ;WITH claimable AS (
                 SELECT TOP (1) *
                 FROM {JobsTableSql} WITH (UPDLOCK, READPAST, ROWLOCK)
                 WHERE Status = @queued
                    OR (Status = @processing AND LeaseExpiresAtUtc < @now AND Attempts < @maxAttempts)
                 ORDER BY CreatedAtUtc, Id
             )
-            UPDATE next
+            UPDATE claimable
             SET Status = @processing, Attempts = Attempts + 1, LeaseOwner = @owner, LeaseExpiresAtUtc = @leaseUntil,
                 StartedAtUtc = COALESCE(StartedAtUtc, @now), Error = NULL
             OUTPUT inserted.Id, inserted.Attempts, inserted.MaxChunkCharacters;
@@ -210,27 +210,29 @@ public sealed class SqlIngestQueue : IIngestQueue
     /// <inheritdoc />
     public async Task<IngestJobStatus> FailJobAsync(Guid jobId, string error, CancellationToken cancellationToken = default)
     {
-        var now = DateTime.UtcNow;
-        var maxAttempts = _settings.MaxAttempts;
         await using var db = CreateContext();
+
+        var attempts = await db.IngestJobs.AsNoTracking()
+            .Where(j => j.Id == jobId)
+            .Select(j => (int?)j.Attempts)
+            .SingleOrDefaultAsync(cancellationToken)
+            ?? throw new InvalidOperationException($"Ingest job {jobId} not found.");
+
+        // Only the worker holding the claim calls this, so reading then writing is not racy.
+        var exhausted = attempts >= _settings.MaxAttempts;
+        var status = exhausted ? IngestJobStatus.Failed : IngestJobStatus.Queued;
+        DateTime? completedAt = exhausted ? DateTime.UtcNow : null;
 
         await db.IngestJobs.Where(j => j.Id == jobId)
             .ExecuteUpdateAsync(s => s
-                .SetProperty(j => j.Status, j => j.Attempts >= maxAttempts ? IngestJobStatus.Failed : IngestJobStatus.Queued)
-                .SetProperty(j => j.CompletedAtUtc, j => j.Attempts >= maxAttempts ? now : (DateTime?)null)
+                .SetProperty(j => j.Status, status)
+                .SetProperty(j => j.CompletedAtUtc, completedAt)
                 .SetProperty(j => j.Error, error)
                 .SetProperty(j => j.LeaseOwner, (string?)null)
                 .SetProperty(j => j.LeaseExpiresAtUtc, (DateTime?)null),
                 cancellationToken);
 
-        var status = await db.IngestJobs.AsNoTracking()
-            .Where(j => j.Id == jobId)
-            .Select(j => (IngestJobStatus?)j.Status)
-            .SingleOrDefaultAsync(cancellationToken);
-        if (status is null)
-            throw new InvalidOperationException($"Ingest job {jobId} not found.");
-
-        if (status == IngestJobStatus.Failed)
+        if (exhausted)
         {
             // Terminal: drop the bytes of files that were never processed.
             await db.IngestJobFiles.Where(f => f.JobId == jobId && f.Status == IngestFileStatus.Queued)
@@ -241,7 +243,7 @@ public sealed class SqlIngestQueue : IIngestQueue
                     cancellationToken);
         }
 
-        return status.Value;
+        return status;
     }
 
     /// <inheritdoc />
