@@ -27,7 +27,7 @@ public sealed class SqlServerFixture : IAsyncLifetime
             return;
         }
 
-        _container = new MsSqlBuilder().WithImage(Image).Build();
+        _container = new MsSqlBuilder(Image).Build();
         await _container.StartAsync();
         _serverConnectionString = _container.GetConnectionString();
     }
