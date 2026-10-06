@@ -1,570 +1,259 @@
 # Pixelbadger.Toolkit.Rag
 
-A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 and vector similarity search indexing, querying, content-aware chunking (paragraph and markdown), and MCP server functionality powered by Lucene.NET and sqlite-vec.
+`pbrag` is a CLI and MCP server for retrieval-augmented generation (RAG). It ingests text, image and audio files into a hybrid index and answers queries with **hybrid search**: Lucene.NET BM25 keyword search plus semantic vector search over SQL Server, fused with Reciprocal Rank Fusion (RRF).
+
+- **Embeddings run locally.** [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (ONNX, fp32, 256-d Matryoshka) via ONNX Runtime. No API key, no data leaves your machine, and the tool never downloads a model.
+- **Storage is SQL Server 2025 / Azure SQL.** Documents, chunks (text and metadata) and `vector(256)` embeddings live in SQL; Lucene holds only the BM25 index.
+- **Multimodal.** Text (`.txt`, `.md`), images and audio are each ingested as their own documents and searched together.
+- **MCP server.** `pbrag serve` exposes a single `Search` tool to AI assistants over stdio.
+
+> Version 2.0 is a breaking change from 1.x: OpenAI embeddings and the SQLite-vec store are gone, the `bm25` / `vector` search modes (and `--search-mode`, `--no-vectors`, the MCP `searchMode` parameter and the `Execute` tool name) are removed, and indices from 1.x must be re-ingested.
 
 ## Table of Contents
 
+- [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [Usage](#usage)
-- [Available Commands](#available-commands)
-  - [ingest](#ingest)
-  - [query](#query)
-  - [serve](#serve)
-- [MCP Server Integration](#mcp-server-integration)
-- [Help](#help)
-- [Requirements](#requirements)
-- [Technical Details](#technical-details)
-  - [BM25 Similarity Search](#bm25-similarity-search)
-  - [Content Chunking](#content-chunking)
-  - [Index Structure](#index-structure)
+- [Configuration](#configuration)
+- [Commands](#commands)
+- [MCP server](#mcp-server)
+- [Supported content](#supported-content)
+- [How it works](#how-it-works)
+- [Development and testing](#development-and-testing)
+
+## Prerequisites
+
+### 1. SQL Server 2025 or Azure SQL
+
+The `vector` type needs **SQL Server 2025**, **Azure SQL Database**, Azure SQL Managed Instance or SQL database in Fabric. Locally, the Developer edition in Docker is the easiest option:
+
+```bash
+docker run -d --name sql2025 -p 1433:1433 \
+  -e ACCEPT_EULA=Y -e MSSQL_PID=Developer \
+  -e 'MSSQL_SA_PASSWORD=Pbrag_Dev_Pass1!' \
+  mcr.microsoft.com/mssql/server:2025-latest
+```
+
+Connection string for that container:
+
+```
+Server=localhost,1433;User Id=sa;Password=Pbrag_Dev_Pass1!;TrustServerCertificate=True;Encrypt=False
+```
+
+`pbrag ingest` creates the database/tables for you by applying EF Core migrations; the login needs permission to create them.
+
+**Approximate vector index and PREVIEW_FEATURES.** Once a chunk table holds at least 100 rows, ingestion creates a DiskANN vector index so queries use approximate `VECTOR_SEARCH`. That index is generally available in Azure SQL Database but is a **preview feature on SQL Server 2025**, where the database needs `ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON;` (the tool sets this where needed). The local preview build can lag Azure's, so if you hit problems pass `--exact-vector-search` to always use exact `VECTOR_DISTANCE` search. Results are the same up to approximation; exact search is simply slower on very large corpora.
+
+### 2. The EmbeddingGemma 2 model (local copy)
+
+`pbrag` loads the model from a local directory given by `--model-path` or `PBRAG_MODEL_PATH`. Download the [`onnx-community/embeddinggemma-2-ONNX`](https://huggingface.co/onnx-community/embeddinggemma-2-ONNX) files once:
+
+```bash
+pip install -U "huggingface_hub[cli]"
+
+huggingface-cli download onnx-community/embeddinggemma-2-ONNX \
+  --local-dir ~/models/embeddinggemma-2-onnx \
+  --include "tokenizer.json" "tokenizer_config.json" "config.json" "processor_config.json" \
+            "onnx/model.onnx" "onnx/model.onnx_data" \
+            "onnx/vision_encoder.onnx" "onnx/vision_encoder.onnx_data" \
+            "onnx/audio_encoder.onnx" "onnx/audio_encoder.onnx_data"
+
+export PBRAG_MODEL_PATH=~/models/embeddinggemma-2-onnx
+```
+
+Notes:
+
+- Use the **fp32** text model (`onnx/model.onnx`) plus the **vision** and **audio encoders**. The quantised and fp16 variants are not used (fp16 is unsuitable on CPU).
+- Each `.onnx_data` file **must sit beside its `.onnx`** with its original name: the external-data reference is by filename.
+- Disk use is roughly 3 GB (text 1.1 GB, vision 0.7 GB, audio 1.2 GB). The query/serve processes only load the text model; the vision and audio encoders load lazily when an image or audio file is ingested.
+
+### 3. ffmpeg (audio only)
+
+Audio ingestion decodes files with `ffmpeg` (16 kHz mono). Install it and make sure it is on `PATH` (`apt install ffmpeg`, `brew install ffmpeg`, `winget install ffmpeg`). Without it, audio files fail with a clear error; text and images are unaffected.
 
 ## Installation
 
-### Option 1: Install as .NET Global Tool (Recommended)
-
-Install the tool globally using the NuGet package:
 ```bash
 dotnet tool install --global Pixelbadger.Toolkit.Rag
-```
-
-Once installed, you can use the `pbrag` command from anywhere:
-```bash
 pbrag --help
 ```
 
-### Option 2: Build from Source
+Or from source (.NET 10 SDK):
 
-Clone the repository and build the project:
 ```bash
-git clone https://github.com/pixelbadger/Pixelbadger.Toolkit.git
-cd Pixelbadger.Toolkit/Pixelbadger.Toolkit.Rag
+git clone https://github.com/pixelbadger/Pixelbadger.Toolkit.Rag.git
+cd Pixelbadger.Toolkit.Rag
 dotnet build
+dotnet run --project Pixelbadger.Toolkit.Rag -- --help
 ```
 
-## Usage
+## Configuration
 
-### Using the Global Tool (pbrag)
-Run commands using the flat command pattern:
-```bash
-pbrag [command] [options]
-```
+Every command takes the same connection options. The environment variables are fallbacks; explicit options win.
 
-### Using from Source
-If building from source, use:
-```bash
-dotnet run -- [command] [options]
-```
+| Option | Environment variable | Description |
+|---|---|---|
+| `--index-path` (required) | | Lucene BM25 index directory. `ingest` creates it; `query` and `serve` require it to exist. |
+| `--connection-string` | `PBRAG_CONNECTION_STRING` | SQL Server 2025 / Azure SQL connection string. |
+| `--model-path` | `PBRAG_MODEL_PATH` | Local EmbeddingGemma 2 ONNX snapshot directory. |
+| `--exact-vector-search` | | Always use exact `VECTOR_DISTANCE` instead of the approximate vector index. |
 
-## Available Commands
+A missing connection string or model path is reported with a clear message and a non-zero exit code. Errors go to stderr; commands return exit code 0 on success, 1 on error, and 130 when cancelled.
+
+The SQL database and the Lucene index belong together: use one `--index-path` per SQL database, and re-ingest if you delete either.
+
+## Commands
 
 ### ingest
 
-Ingest content files into search indexes with content-aware chunking. By default this creates Lucene BM25 and SQLite-vec indexes, which sends document chunks to OpenAI for embedding generation.
+Ingest a file or a folder (recursively). Applies database migrations first, then reads, chunks, embeds and stores each file, and prints a per-file summary.
 
-**Usage:**
 ```bash
-pbrag ingest --index-path <index-directory> --content-path <content-file>
+export PBRAG_CONNECTION_STRING='Server=localhost,1433;User Id=sa;Password=Pbrag_Dev_Pass1!;TrustServerCertificate=True;Encrypt=False'
+export PBRAG_MODEL_PATH=~/models/embeddinggemma-2-onnx
+
+pbrag ingest --index-path ./index --content-path ./docs
+pbrag ingest --index-path ./index --content-path ./photos/mars.jpg
 ```
 
-**Options:**
-- `--index-path`: Path to the Lucene.NET index directory (required)
-- `--content-path`: Path to the content file or folder to ingest (required)
-- `--no-vectors`: Disable vector storage and avoid sending document content to OpenAI
-- `--max-file-size-bytes`: Maximum size for a single ingested file (default: 10485760)
-- `--max-files`: Maximum number of supported files to ingest from a folder (default: 1000)
-- `--max-chunk-characters`: Maximum size for a single chunk before indexing or embedding (default: 20000)
-- `--allow-symlinks`: Allow symbolic links and reparse points during ingestion (disabled by default)
+| Option | Default | Description |
+|---|---|---|
+| `--content-path` (required) | | File or folder to ingest. |
+| `--max-file-size-bytes` | 10485760 | Maximum size of a single file. |
+| `--max-files` | 1000 | Maximum number of supported files taken from a folder. |
+| `--max-chunk-characters` | 20000 | Maximum size of a single text chunk. |
+| `--allow-symlinks` | off | Follow symbolic links / reparse points (refused by default so folder ingestion cannot escape its root). |
 
-**Examples:**
-```bash
-# Set OpenAI API key (required for vector embeddings)
-export OPENAI_API_KEY="sk-..."
+Re-ingesting a file **replaces** its previous chunks (document ids are derived from the file's full path). Per-file failures in a folder run are listed and the command exits with code 1; the other files are still ingested. Example output:
 
-# Ingest a single text document (uses paragraph chunking)
-pbrag ingest --index-path ./search-index --content-path document.txt
-
-# Ingest a markdown file (uses header-based chunking)
-pbrag ingest --index-path ./search-index --content-path readme.md
-
-# Ingest an entire folder
-pbrag ingest --index-path ./search-index --content-path ./docs-folder
-
-# Ingest locally without OpenAI embeddings
-pbrag ingest --index-path ./search-index --content-path ./docs-folder --no-vectors
-
-# Build an index from multiple files
-pbrag ingest --index-path ./search-index --content-path doc1.txt
-pbrag ingest --index-path ./search-index --content-path doc2.md
-pbrag ingest --index-path ./search-index --content-path doc3.txt
 ```
-
-**Details:**
-- Uses content-aware chunking: paragraphs for .txt files, headers for .md files
-- Supports both single files and folders (recursively processes all .txt and .md files)
-- Automatically creates dual indexes unless `--no-vectors` is used: Lucene BM25 for keyword search and SQLite-vec for semantic search
-- Creates index directory if it doesn't exist
-- Appends to existing index, allowing incremental ingestion
-- Each chunk is indexed with source file, chunk number, unique source ID, and vector embeddings
-- Requires `OPENAI_API_KEY` environment variable for vector embedding generation unless `--no-vectors` is used
-- Refuses symlinks by default to avoid indexing files outside the selected folder
-- Enforces file count, file size, and chunk size limits to avoid accidental resource exhaustion
+  OK    /data/docs/guide.md  [Text, 12 chunk(s), doc_3f0c...]
+  OK    /data/docs/mars.png  [Image, 1 chunk(s), doc_91ab...]
+  FAIL  /data/docs/talk.mp3: ffmpeg was not found on PATH
+Ingested 2 file(s), 1 failed, 0 skipped (Lucene index: './index').
+```
 
 ### query
 
-Perform BM25 similarity search against a Lucene.NET index to find relevant content.
+Hybrid search from the command line.
 
-**Usage:**
 ```bash
-pbrag query --index-path <index-directory> --query <search-query> [--max-results <number>] [--sourceIds <id1> <id2> ...]
+pbrag query --index-path ./index --query "why is Mars red" --max-results 5
+pbrag query --index-path ./index --query "tcp handshake" --source-ids <sourceId1> <sourceId2>
 ```
 
-**Options:**
-- `--index-path`: Path to the Lucene.NET index directory (required)
-- `--query`: Search query text (required)
-- `--max-results`: Maximum number of results to return (optional, default: 10)
-- `--sourceIds`: Optional list of source IDs to constrain search results (optional)
-- `--search-mode`: Search mode to use: bm25, vector, or hybrid (optional, default: bm25)
-- Search requests are bounded: query text up to 4096 characters, `--max-results` from 1 to 100, up to 100 source IDs, and source IDs up to 256 characters each
+| Option | Default | Description |
+|---|---|---|
+| `--query` (required) | | Query text (up to 4096 characters). |
+| `--max-results` | 10 | 1 to 100. |
+| `--source-ids` (alias `--sourceIds`) | | Restrict results to these source ids (up to 100, 256 characters each). |
 
-**Examples:**
-```bash
-# Basic search query
-pbrag query --index-path ./search-index --query "machine learning algorithms"
+Each result shows its rank, fused score, chunk id, document id, source file, modality and locator (character offsets for text, `mm:ss` range for audio), followed by the chunk text, or an `[image]` / `[audio mm:ss–mm:ss]` marker for media:
 
-# Limit results to top 5
-pbrag query --index-path ./search-index --query "neural networks" --max-results 5
-
-# Search within specific source documents
-pbrag query --index-path ./search-index --query "data processing" --sourceIds doc1.txt doc2.md
-
-# Complex multi-word query
-pbrag query --index-path ./search-index --query "how to implement dependency injection in C#"
-
-# Vector similarity search (requires OPENAI_API_KEY environment variable)
-export OPENAI_API_KEY="sk-..."
-pbrag query --index-path ./search-index --query "machine learning algorithms" --search-mode vector
-
-# Hybrid search combining BM25 and vector (requires OPENAI_API_KEY environment variable)
-pbrag query --index-path ./search-index --query "neural networks" --search-mode hybrid
 ```
+Found 2 result(s) using hybrid search:
 
-**Output Format:**
-```
-Found 3 result(s):
-
-Result 1 (Score: 2.4531)
-Source: document.txt (Paragraph 5)
-Content: Machine learning algorithms are fundamental to modern AI systems...
+Result 1 (Score: 0.0328)
+Chunk ID: 8f6c7a4e-0d2b-4c58-9f43-52f1f8a6f0aa
+Document ID: doc_3f0c1b0e5d7a4e9c8b21aa04f7d3c6e1
+Source: mars.md (chunk 3)
+Modality: Text
+Locator: chars 1204–1890
+Content: Mars appears red because of iron oxide on its surface...
 ------------------------------------------------------------
-Result 2 (Score: 1.8923)
-Source: readme.md (Paragraph 12)
-Content: Neural networks represent a class of machine learning models...
-------------------------------------------------------------
-Result 3 (Score: 1.2451)
-Source: guide.txt (Paragraph 3)
-Content: The application of algorithms in machine learning has transformed...
+Result 2 (Score: 0.0164)
+Chunk ID: 2c1e9d33-...
+Document ID: doc_91ab...
+Source: talk.mp3 (chunk 2)
+Modality: Audio
+Locator: 00:30–01:00
+Content: [audio 00:30–01:00]
 ```
 
 ### serve
 
-Host an MCP (Model Context Protocol) server that performs BM25 queries against a Lucene.NET index, enabling AI assistants to search your indexed content.
+Starts a stdio MCP server. It takes the same connection options and never writes to stdout except MCP protocol messages (logs go to stderr).
 
-**Usage:**
 ```bash
-pbrag serve --index-path <index-directory>
+pbrag serve --index-path ./index
 ```
 
-**Options:**
-- `--index-path`: Path to the Lucene.NET index directory (required)
+## MCP server
 
-**Examples:**
-```bash
-# Start MCP server for an existing index
-pbrag serve --index-path ./search-index
-```
-
-**Details:**
-- Runs as a stdio-based MCP server
-- Exposes a search tool that AI assistants can call
-- Uses BM25 similarity ranking for relevance
-- Supports result filtering by source IDs
-- Logs all activity to stderr for monitoring
-- Returns indexed content as untrusted document text; MCP clients should not treat returned content as instructions
-- Ideal for integration with Claude Desktop or other MCP-compatible clients
-
-## MCP Server Integration
-
-The `serve` command implements the Model Context Protocol (MCP), allowing AI assistants to search your indexed content dynamically during conversations.
-
-### Claude Desktop Configuration
-
-Add the following to your Claude Desktop configuration:
-
-**MacOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows:** `%APPDATA%/Claude/claude_desktop_config.json`
+### Client configuration (Claude Desktop / Claude Code)
 
 ```json
 {
   "mcpServers": {
     "rag-search": {
       "command": "pbrag",
-      "args": ["serve", "--index-path", "/absolute/path/to/your/search-index"]
+      "args": ["serve", "--index-path", "/absolute/path/to/index"],
+      "env": {
+        "PBRAG_CONNECTION_STRING": "Server=localhost,1433;User Id=sa;Password=...;TrustServerCertificate=True;Encrypt=False",
+        "PBRAG_MODEL_PATH": "/absolute/path/to/embeddinggemma-2-onnx"
+      }
     }
   }
 }
 ```
 
-### MCP Tool Interface
+Claude Desktop: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%/Claude/claude_desktop_config.json` (Windows). Claude Code: `claude mcp add rag-search -e PBRAG_CONNECTION_STRING=... -e PBRAG_MODEL_PATH=... -- pbrag serve --index-path /absolute/path/to/index`.
 
-The server exposes a single tool called `Execute` with the following parameters:
+### Tool: `Search`
 
-- **query** (required): The search query to be performed
-- **maxResults** (optional): Maximum number of results to return (default: 5)
-- **sourceIds** (optional): Array of source IDs to constrain search results to specific documents
-- **searchMode** (optional): Search mode to use: "bm25", "vector", or "hybrid" (default: "bm25")
+| Parameter | Type | Description |
+|---|---|---|
+| `query` | string, required | The search query. |
+| `maxResults` | int, default 5 | Maximum number of results (1 to 100). |
+| `sourceIds` | string[], optional | Restrict results to specific source ids. |
 
-When an AI assistant uses this tool, it receives formatted search results including relevance scores, source files, paragraph numbers, and content excerpts.
+There is no search-mode parameter: every search is hybrid. Results carry the chunk id, document id, source, source id, modality, locator and content. All returned content is framed as **untrusted document text**: clients must treat it as data, not instructions. Invalid arguments return their message as a tool error; unexpected failures return a generic error and are logged to stderr.
 
-### Workflow Example
+## Supported content
+
+| Kind | Extensions | How it is indexed |
+|---|---|---|
+| Text | `.txt`, `.md` | Paragraph chunks (`.txt`) or header sections (`.md`); one chunk per row, with character-offset locators. Embedded with the EmbeddingGemma document prompt. |
+| Image | `.png` `.jpg` `.jpeg` `.webp` `.gif` `.bmp` `.tif` `.tiff` | One chunk per image, embedded by the vision encoder (not OCR'd). Matched by text queries; results show `[image]`. |
+| Audio | `.wav` `.mp3` `.m4a` `.flac` `.ogg` `.opus` `.aac` | About 30-second windows, one chunk each, with millisecond locators. Requires ffmpeg. Results show `[audio mm:ss–mm:ss]`. |
+
+Video and images embedded inside documents are not supported. Only text chunks participate in BM25; image and audio chunks are found through the vector side of the hybrid search.
+
+## How it works
+
+```
+Ingest:  file -> modality routing (extension)
+              text : reader -> chunker -> EmbeddingGemma 2 (text)
+              image: decode -> patchify -> vision encoder -> EmbeddingGemma 2
+              audio: ffmpeg -> log-mel windows -> audio encoder -> EmbeddingGemma 2
+          -> SQL Server (Document, Chunk + vector(256))  -> Lucene (text chunks, keyed by chunk id)
+
+Search:  query -> [Lucene BM25 top-N | SQL vector top-N] -> RRF (k = 60) -> hydrate from SQL -> results
+```
+
+**Domain model.** A `Document` is one ingested file; it has an integer primary key and a unique, deterministic global id (`doc_` + the first 32 hex characters of SHA-256 over the file's full normalised path). A `Document` has many `Chunk`s; a chunk has an integer clustered primary key (the id Lucene stores), a unique `Guid` global id (shown to users as the chunk id), the document foreign key, its ordinal, modality, locator range, text (text chunks only) and the 256-d embedding. Chunks are stored in `dbo.Chunks_EG2_256`. The `EG2_256` suffix names the model and dimension; changing either means a new table and a full re-embed.
+
+**Hybrid search.** BM25 and vector search each fetch `max(2n, 20)` candidates; ranks are fused with `1 / (60 + rank)` and summed for chunks that appear in both lists. Final results are hydrated from SQL, so Lucene never needs to store content.
+
+**Embeddings.** 256 dimensions (the first 256 of the model's Matryoshka output, re-normalised to unit length). Queries and documents use EmbeddingGemma's asymmetric prompts.
+
+**Privacy.** Chunk text and source paths are stored in SQL Server in plaintext. Protect the database and avoid ingesting secrets unless that is acceptable.
+
+## Development and testing
 
 ```bash
-# Step 1: Ingest your documentation
-pbrag ingest --index-path ./docs-index --content-path ./api-docs.md
-pbrag ingest --index-path ./docs-index --content-path ./tutorial.md
-pbrag ingest --index-path ./docs-index --content-path ./reference.txt
-
-# Step 2: Test queries locally
-pbrag query --index-path ./docs-index --query "authentication"
-
-# Step 3: Start MCP server (or configure in Claude Desktop)
-pbrag serve --index-path ./docs-index
+dotnet build
+dotnet test
 ```
 
-## Help
+- Tests use **xUnit, FluentAssertions and Moq**. SQL-backed tests run against a SQL Server 2025 container started by **Testcontainers** (Docker required; shared via the `SqlServer` collection fixture).
+- To reuse an existing SQL Server instead of starting a container, set `PBRAG_TEST_SQL_CONNECTION_STRING` to its connection string.
+- Embedding-dependent tests use a deterministic mock embedding service. **Golden tests** that compare against the real ONNX model run only when `PBRAG_MODEL_PATH` points at a local model; otherwise they are skipped. Reference vectors are generated with the transformers.js scripts in [`tools/golden`](tools/golden).
+- CI (`.github/workflows`) runs on .NET 10 and, on pull requests that change `Pixelbadger.Toolkit.Rag/`, requires a version bump over the latest NuGet release.
 
-Get help for any command by adding `--help`:
-```bash
-pbrag --help                     # General help
-pbrag ingest --help              # Command-specific help
-pbrag query --help               # Command-specific help
-pbrag serve --help               # Command-specific help
-```
+## Evaluations
 
-## Requirements
+[`EVALS.md`](EVALS.md) and [`docs/bm25-vs-hybrid-analysis.md`](docs/bm25-vs-hybrid-analysis.md) are historical (pre-2.0, OpenAI embeddings) and kept for context.
 
-- .NET 9.0
-- Lucene.NET 4.8.0 (beta)
-- ModelContextProtocol 0.3.0 (for MCP server functionality)
-- Microsoft.Extensions.VectorData.Abstractions 9.7.0 (for vector data abstractions)
-- Microsoft.SemanticKernel.Connectors.SqliteVec 1.68.0-preview (for sqlite-vec vector storage)
-- Microsoft.Extensions.AI (for embedding generation)
+## License
 
-## Architecture Overview
-
-This section provides a detailed overview of the document ingestion and search pipelines, illustrating how documents flow through the system from raw files to searchable indexed content, and how queries are processed to retrieve relevant results.
-
-### Document Ingestion Pipeline
-
-The ingestion pipeline processes documents through four main phases: file reading, content-aware chunking, dual-index storage, and embedding generation.
-
-```mermaid
-flowchart TD
-    Start([Document Files]) --> FileReader[Phase 1: File Reading<br/>FileReaderFactory]
-
-    FileReader --> |Routes by extension| PlainText[PlainTextFileReader<br/>.txt files]
-    FileReader --> |Routes by extension| Markdown[MarkdownFileReader<br/>.md files]
-
-    PlainText --> RawTextTxt[Raw Text Content<br/>.txt]
-    Markdown --> RawTextMd[Raw Text Content<br/>.md]
-
-    RawTextTxt --> ChunkerFactory{ChunkerFactory<br/>Select by extension}
-    RawTextMd --> ChunkerFactory
-
-    ChunkerFactory --> |.txt files| ParaChunker[ParagraphTextChunker<br/>Split by paragraphs]
-    ChunkerFactory --> |.md files| MdChunker[MarkdownTextChunker<br/>Split by headers H1-H6]
-
-    ParaChunker --> |Paragraph boundaries| Chunks[Phase 2: Text Chunks<br/>IChunk objects]
-    MdChunker --> |Header sections| Chunks
-
-    Chunks --> Storage[Phase 3: Dual-Index Storage]
-
-    Storage --> Lucene[Lucene BM25 Index<br/>LuceneRepository<br/>Stores chunks]
-    Storage --> Vector[SQLite-vec Database<br/>VectorRepository<br/>Generates + stores embeddings]
-
-    Lucene --> |Stores| LuceneFields[Fields:<br/>- content<br/>- source_file<br/>- source_path<br/>- source_id<br/>- paragraph_number<br/>- document_id]
-
-    Vector --> |Phase 4: Per-chunk| EmbedGen[Embedding Generation<br/>OpenAI text-embedding-3-large<br/>3072 dimensions]
-
-    EmbedGen --> VectorFields[ChunkVectorRecord:<br/>- Key<br/>- Content<br/>- Metadata fields<br/>- Embedding vector]
-
-    LuceneFields --> Complete([Indexed Content<br/>Ready for Search])
-    VectorFields --> Complete
-
-    style Start fill:#e1f5ff
-    style Complete fill:#d4edda
-    style Lucene fill:#fff3cd
-    style Vector fill:#fff3cd
-    style ChunkerFactory fill:#f8d7da
-    style EmbedGen fill:#d1ecf1
-```
-
-#### Ingestion Pipeline Phases
-
-**Phase 1: File Reading**
-- **Component**: `FileReaderFactory` with `IFileReader` implementations
-- **Location**: `Pixelbadger.Toolkit.Rag/Components/FileReaders/`
-- **Process**:
-  - FileReaderFactory identifies file type by extension
-  - Routes files to appropriate reader (PlainTextFileReader for `.txt`, MarkdownFileReader for `.md`)
-  - Extracts raw text content from files
-  - Supports both single file and folder-based batch ingestion
-
-**Phase 2: Content-Aware Chunking**
-- **Component**: `ChunkerFactory` with `ParagraphTextChunker` and `MarkdownTextChunker`
-- **Location**: `Pixelbadger.Toolkit.Rag/Components/`
-- **Process**:
-  - ChunkerFactory selects chunker based on file extension
-  - **For .txt files**: `ParagraphTextChunker`
-    - Splits on double newlines (paragraph boundaries)
-    - Falls back to single newlines if no paragraphs detected
-    - Preserves natural document structure
-  - **For .md files**: `MarkdownTextChunker`
-    - Uses `MarkdownChunker` to split by headers (H1-H6)
-    - Preserves header hierarchy and context
-    - Each chunk includes the header and its content
-    - Handles content before first header appropriately
-  - Produces `IChunk` objects with content and chunk numbers
-  - No embedding generation at this stage (deferred to storage phase)
-
-**Phase 3: Dual-Index Storage**
-- **Components**:
-  - `LuceneRepository` for BM25 keyword search
-  - `VectorRepository` for semantic vector search
-- **Storage Locations**:
-  - Lucene: `{index-path}/` (FSDirectory structure)
-  - Vectors: `{index-path}/vectors.db` (SQLite database)
-  - Indexed content and source path metadata are stored in plaintext. Protect index directories with filesystem permissions and avoid indexing secrets unless this is acceptable.
-- **Process**:
-  - Both indexing operations run sequentially
-  - Filters out empty chunks before storage
-  - Lucene stores chunks directly (no embeddings needed)
-  - VectorRepository generates embeddings during storage (Phase 4)
-  - Each chunk is stored in both indexes with consistent metadata
-- **Lucene Fields**:
-  - `content`: Full text content (searchable, stored)
-  - `source_file`: Original filename
-  - `source_path`: Full file path
-  - `source_id`: Unique source identifier
-  - `paragraph_number`: Chunk sequence number
-  - `document_id`: Unique document identifier
-
-**Phase 4: Embedding Generation (During Vector Storage)**
-- **Component**: `OpenAIEmbeddingService` with `text-embedding-3-large` model
-- **Location**: `VectorRepository.StoreVectorsAsync()`
-- **Dimensions**: 3072-dimensional vectors
-- **Process**:
-  - For each chunk being stored, generates embedding on-demand
-  - Uses `IEmbeddingService.GenerateEmbeddingAsync()` per chunk
-  - Embeddings are computed during storage, not during chunking
-  - Requires `OPENAI_API_KEY` environment variable
-- **Vector Record Structure**:
-  - Key: Unique identifier
-  - Content: Chunk text
-  - Source metadata (file, path, id)
-  - ChunkNumber: Sequence number
-  - DocumentId: Unique document identifier
-  - Embedding: 3072-dimension vector (generated during storage)
-
-**Orchestrator**: `SearchIndexer.IngestContentAsync()` and `SearchIndexer.IngestFolderAsync()`
-
-### Search and Retrieval Pipeline
-
-The retrieval pipeline supports three search modes: BM25 keyword search, vector semantic search, and hybrid search combining both strategies with Reciprocal Rank Fusion (RRF).
-
-```mermaid
-flowchart TD
-    Query([Query Text]) --> ModeSwitch{Search Mode?}
-
-    ModeSwitch --> |BM25| BM25Path[BM25 Search Path]
-    ModeSwitch --> |Vector| VectorPath[Vector Search Path]
-    ModeSwitch --> |Hybrid| HybridPath[Hybrid Search Path]
-
-    BM25Path --> QueryParser[Phase 1a: Query Parsing<br/>StandardAnalyzer<br/>QueryParser]
-    QueryParser --> LuceneSearch[Phase 2a: Lucene Search<br/>BM25Similarity scoring]
-    LuceneSearch --> |Optional filter| SourceFilter1[Filter by source_id<br/>BooleanQuery]
-    SourceFilter1 --> BM25Results[BM25 Scored Results]
-
-    VectorPath --> EmbedQuery[Phase 1b: Query Embedding<br/>IEmbeddingService<br/>text-embedding-3-large]
-    EmbedQuery --> VectorSearch[Phase 2b: Vector Search<br/>Euclidean distance<br/>SQLite-vec]
-    VectorSearch --> |Convert| CosineSim[Convert to Cosine Similarity<br/>1.0 - distance² / 2.0]
-    CosineSim --> |Optional filter| SourceFilter2[Filter by source_id<br/>VectorSearchOptions]
-    SourceFilter2 --> VectorResults[Vector Scored Results]
-
-    HybridPath --> ParallelSplit[Execute Both Searches<br/>in Parallel]
-    ParallelSplit --> BM25Branch[BM25 Search<br/>Fetch 2x max results<br/>minimum 20]
-    ParallelSplit --> VectorBranch[Vector Search<br/>Fetch 2x max results<br/>minimum 20]
-
-    BM25Branch --> RRF[Phase 3: Reciprocal Rank Fusion<br/>RrfReranker]
-    VectorBranch --> RRF
-
-    RRF --> |k = 60| RRFCalc[RRF Score Calculation<br/>Σ 1 / k + rank<br/>for each result list]
-    RRFCalc --> MergeScores[Merge by DocumentId<br/>Sum RRF scores]
-    MergeScores --> SortFused[Sort by fused score<br/>Return top N]
-    SortFused --> HybridResults[Hybrid Fused Results]
-
-    BM25Results --> Output([Search Results<br/>with scores and metadata])
-    VectorResults --> Output
-    HybridResults --> Output
-
-    style Query fill:#e1f5ff
-    style Output fill:#d4edda
-    style BM25Path fill:#fff3cd
-    style VectorPath fill:#d1ecf1
-    style HybridPath fill:#f8d7da
-    style RRF fill:#e7e7ff
-```
-
-#### Search Pipeline Phases
-
-**BM25 Search Mode**
-
-*Phase 1a: Query Parsing*
-- **Component**: `QueryParser` with `StandardAnalyzer`
-- **Location**: `LuceneRepository.QueryLuceneAsync()`
-- **Process**:
-  - Parses query text using Lucene's QueryParser
-  - Applies StandardAnalyzer for tokenization and normalization
-  - Generates query against the "content" field
-  - Optional: Adds BooleanQuery filter for source_id constraints
-
-*Phase 2a: Lucene Search*
-- **Component**: `LuceneRepository` with `BM25Similarity`
-- **Process**:
-  - Opens Lucene FSDirectory index
-  - Executes search with BM25 relevance scoring
-  - BM25 considers term frequency, document frequency, and document length
-  - Returns scored `SearchResult` objects with metadata
-  - Results include: score, content, source file, source path, source id, paragraph number, document id
-
-**Vector Search Mode**
-
-*Phase 1b: Query Embedding*
-- **Component**: `IEmbeddingService` with OpenAI `text-embedding-3-large`
-- **Location**: `VectorRepository.QueryVectorsAsync()`
-- **Process**:
-  - Generates 3072-dimension embedding vector for query text
-  - Uses same model as document ingestion for consistency
-  - Requires `OPENAI_API_KEY` environment variable
-
-*Phase 2b: Vector Similarity Search*
-- **Component**: `VectorRepository` with SQLite-vec
-- **Process**:
-  - Opens SQLite-vec database at `{index-path}/vectors.db`
-  - Performs vector similarity search using Euclidean distance
-  - Converts Euclidean distance to cosine similarity: `1.0 - (distance² / 2.0)`
-  - Optional: Applies source_id filter via VectorSearchOptions
-  - Returns scored `SearchResult` objects
-  - Results ranked by semantic similarity to query
-
-**Hybrid Search Mode**
-
-*Phase 1-2: Parallel Execution*
-- **Process**:
-  - Executes both BM25 and Vector searches concurrently
-  - Fetches `2 × max_results` from each index (minimum 20 per index)
-  - Over-fetching ensures better fusion quality
-  - Both searches apply same source_id filters if specified
-
-*Phase 3: Reciprocal Rank Fusion (RRF)*
-- **Component**: `RrfReranker`
-- **Algorithm**: Reciprocal Rank Fusion with k=60 (standard parameter)
-- **Formula**: `RRF_score(doc) = Σ(1 / (k + rank))` across both result lists
-- **Process**:
-  1. Receives results from both BM25 and Vector searches
-  2. Calculates RRF score for each document in each list
-  3. Groups results by DocumentId
-  4. Sums RRF scores for documents appearing in both lists
-  5. Sorts merged results by total RRF score (descending)
-  6. Returns top N results as specified by max_results
-- **Benefits**:
-  - Combines strengths of keyword matching (BM25) and semantic understanding (vectors)
-  - Documents appearing in both result sets get higher scores
-  - Robust to differences in scoring scales between BM25 and vector search
-  - No manual weight tuning required
-
-**Orchestrator**: `SearchIndexer.SearchAsync()`
-
-#### Search Result Output
-
-All search modes return `SearchResult` objects containing:
-- **Score**: Relevance score (BM25 score, cosine similarity, or RRF score)
-- **Content**: The chunk text content
-- **SourceFile**: Original filename
-- **SourcePath**: Full file path
-- **SourceId**: Unique source identifier
-- **ParagraphNumber**: Chunk sequence number
-- **DocumentId**: Unique document identifier
-
-## Technical Details
-
-### BM25 Similarity Search
-### Vector Similarity Search
-
-Vector similarity search complements BM25 with semantic understanding of content. This implementation:
-
-- Uses OpenAI's `text-embedding-3-large` model (3072 dimensions) for generating embeddings
-- Stores embeddings in a sqlite-vec database alongside the Lucene index
-- Calculates cosine similarity between query embeddings and stored document embeddings
-- Supports three search modes: pure vector search, BM25 keyword search, or hybrid search combining both with Reciprocal Rank Fusion (RRF)
-- Requires `OPENAI_API_KEY` environment variable for embedding generation during ingest and queries
-- Embeddings are generated during content ingestion and stored persistently for efficient querying
-- Enables semantic search that understands meaning and context beyond keyword matching
-
-### Content Chunking
-
-The system uses content-aware chunking strategies tailored to each file type:
-
-**Paragraph Chunking (.txt files)**
-- Implemented by `ParagraphChunker` and `ParagraphTextChunker`
-- Splits text on double newlines (`\n\n`, `\r\n\r\n`) to identify paragraph boundaries
-- Falls back to single newlines if no double newlines are found
-- Filters out empty or whitespace-only paragraphs
-- Preserves the natural document structure without breaking mid-thought
-- Each chunk receives a sequential chunk number
-
-**Markdown Chunking (.md files)**
-- Implemented by `MarkdownChunker` and `MarkdownTextChunker`
-- Splits markdown documents by headers (H1-H6: `#` to `######`)
-- Each chunk includes the header line and all content until the next header
-- Preserves header hierarchy and context
-- Handles content before the first header as a separate chunk
-- Captures header text, header level, and line number metadata
-- Ideal for documentation where headers denote topic boundaries
-
-**ChunkerFactory**
-- Automatically selects the appropriate chunker based on file extension
-- `.md` files → `MarkdownTextChunker`
-- All other files (including `.txt`) → `ParagraphTextChunker`
-- Future file types (PDF, DOCX, etc.) will be converted to markdown and use the markdown chunker
-
-**Benefits of Content-Aware Chunking**
-- Respects natural document structure instead of arbitrary token limits
-- Preserves semantic coherence within chunks
-- Markdown chunking maintains topic boundaries via headers
-- Simple, deterministic, and fast (no ML model required for chunking)
-- Embeddings are generated once during storage, not during chunking
-
-### Index Structure
-
-Each indexed chunk contains the following fields:
-
-- **sourceFile**: Original file path for provenance
-- **paragraphNumber**: Sequential chunk number within the source file
-- **content**: The actual text content being indexed and searched
-- **sourceId**: Unique identifier derived from the file path (used for filtering)
-
-The index uses:
-- **StandardAnalyzer**: For robust tokenization and normalization
-- **BM25Similarity**: For relevance-based ranking
-- **SimpleDirectory**: For persistent on-disk storage
-- **Atomic writes**: Index updates are transactional and crash-safe
+MIT

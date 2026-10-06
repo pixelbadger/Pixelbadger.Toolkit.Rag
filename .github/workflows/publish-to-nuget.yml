@@ -37,7 +37,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Restore dependencies
       run: dotnet restore
@@ -45,6 +45,8 @@ jobs:
     - name: Build
       run: dotnet build --no-restore --configuration Release
 
+    # Integration tests start SQL Server 2025 via Testcontainers (Docker is preinstalled on ubuntu-latest).
+    # Real-model golden tests skip themselves unless PBRAG_MODEL_PATH is set.
     - name: Test
       run: dotnet test --no-build --configuration Release --verbosity normal
 
@@ -59,7 +61,7 @@ jobs:
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '9.0.x'
+        dotnet-version: '10.0.x'
 
     - name: Restore dependencies
       run: dotnet restore Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj
