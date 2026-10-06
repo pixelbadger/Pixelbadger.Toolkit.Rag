@@ -1,0 +1,13 @@
+**/bin/
+**/obj/
+**/.vs/
+**/*.user
+.git/
+.github/
+.gitignore
+Dockerfile
+.dockerignore
+Pixelbadger.Toolkit.Rag.Tests/
+docs/
+tools/
+*.md

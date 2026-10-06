@@ -1,0 +1,38 @@
+name: Master Build
+
+# Builds, tests and builds the container image. Nothing is published yet: pushing the image to a registry is a follow-up.
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'Pixelbadger.Toolkit.Rag/**'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '!**/*.Tests/**'
+      - '!.github/**'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build
+      run: dotnet build --no-restore --configuration Release
+
+    # Integration tests start SQL Server 2025 via Testcontainers (Docker is preinstalled on ubuntu-latest).
+    # Real-model golden tests skip themselves unless PBRAG_MODEL_PATH is set.
+    - name: Test
+      run: dotnet test --no-build --configuration Release --verbosity normal
+
+    - name: Build container image (no push)
+      run: docker build --tag pixelbadger-toolkit-rag:${{ github.sha }} .

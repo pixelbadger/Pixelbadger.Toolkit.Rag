@@ -5,6 +5,8 @@ on:
     branches: [ master ]
     paths:
       - 'Pixelbadger.Toolkit.Rag/**'
+      - 'Dockerfile'
+      - '.dockerignore'
       - '!**/*.Tests/**'
       - '!.github/**'
 
@@ -74,5 +76,5 @@ jobs:
     - name: Test
       run: dotnet test --no-build --configuration Release --verbosity normal
 
-    - name: Pack (validation only)
-      run: dotnet pack --no-build --configuration Release --output ./artifacts
+    - name: Build container image (validation only, no push)
+      run: docker build --tag pixelbadger-toolkit-rag:pr-${{ github.event.pull_request.number }} .
