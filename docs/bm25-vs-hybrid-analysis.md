@@ -1,5 +1,7 @@
 # BM25 vs Hybrid Search: Cost-Benefit Analysis
 
+> **Historical note (pre-2.0).** This analysis covers version 1.x, which used OpenAI `text-embedding-3` embeddings (per-query API cost and network latency), SQLite-vec and selectable `bm25` / `vector` / `hybrid` modes. Version 2.0 is hybrid-only with local EmbeddingGemma 2 embeddings and SQL Server vector storage, so there is no per-query API cost and its recommendation and figures no longer apply. It is kept for context only.
+
 **Date:** 2026-01-17
 **Corpus:** Beej's Guide to Network Programming (~200 chunks)
 **Use Case:** Agentic MCP knowledge source (LLM-driven queries)

@@ -14,6 +14,8 @@ public static class DependencyInjection
     /// <summary>Registers the RAG pipeline for one invocation's <paramref name="options"/>.</summary>
     public static IServiceCollection AddRagServices(this IServiceCollection services, RagOptions options)
     {
+        services.AddLogging();
+
         services.AddSingleton(options);
         services.AddSingleton(options.Sql);
         services.AddSingleton(options.Model);
