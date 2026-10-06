@@ -485,3 +485,5 @@ $RECYCLE.BIN/
 
 # Test assets and temporary files
 test-assets/
+# ...except the committed test fixtures (golden tensors, parity expectations); big downloads are ignored by a nested .gitignore
+!Pixelbadger.Toolkit.Rag.Tests/test-assets/
