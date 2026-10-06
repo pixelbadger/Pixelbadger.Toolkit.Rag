@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -10,11 +10,11 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>pbrag</ToolCommandName>
     <PackageId>Pixelbadger.Toolkit.Rag</PackageId>
-    <Version>1.5.0</Version>
+    <Version>2.0.0</Version>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <Authors>Pixelbadger</Authors>
-    <Description>A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing BM25 search indexing, querying, semantic chunking, and MCP server functionality powered by Lucene.NET.</Description>
-    <PackageTags>cli;toolkit;rag;search;lucene;mcp;bm25;semantic;embeddings;chunking</PackageTags>
+    <Description>A CLI toolkit for RAG (Retrieval-Augmented Generation) workflows, providing hybrid (Lucene.NET BM25 + SQL Server vector) search over text, image and audio documents embedded locally with EmbeddingGemma 2 (ONNX), plus MCP server functionality.</Description>
+    <PackageTags>cli;toolkit;rag;search;lucene;mcp;bm25;hybrid;embeddings;onnx;embeddinggemma;sqlserver;multimodal</PackageTags>
     <RepositoryUrl>https://github.com/pixelbadger/Pixelbadger.Toolkit.Rag</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -25,18 +25,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Lucene.Net" Version="4.8.0-beta00016" />
-    <PackageReference Include="Lucene.Net.Analysis.Common" Version="4.8.0-beta00016" />
-    <PackageReference Include="Lucene.Net.QueryParser" Version="4.8.0-beta00016" />
-    <PackageReference Include="Microsoft.Extensions.AI" Version="10.2.0" />
-    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.2.0-preview.1.26063.2" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="9.0.0" />
-    <PackageReference Include="ModelContextProtocol" Version="0.3.0-preview.4" />
-    <PackageReference Include="OpenAI" Version="2.8.0" />
-    <PackageReference Include="System.CommandLine" Version="2.0.0-beta4.22272.1" />
-    <PackageReference Include="Microsoft.Extensions.VectorData.Abstractions" Version="9.7.0" />
-    <PackageReference Include="Microsoft.SemanticKernel.Connectors.SqliteVec" Version="1.68.0-preview" />
+    <PackageReference Include="Lucene.Net" Version="4.8.0-beta00018" />
+    <PackageReference Include="Lucene.Net.Analysis.Common" Version="4.8.0-beta00018" />
+    <PackageReference Include="Lucene.Net.QueryParser" Version="4.8.0-beta00018" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.12" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
+    <PackageReference Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageReference Include="SkiaSharp" Version="4.153.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.153.1" />
+    <PackageReference Include="System.CommandLine" Version="2.0.12" />
   </ItemGroup>
 
 </Project>
