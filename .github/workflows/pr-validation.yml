@@ -41,16 +41,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
       with:
-        dotnet-version: '10.0.x'
+        fetch-depth: 0  # the check compares against the latest v* git tag
 
     - name: Check version increment
       shell: pwsh
       run: |
-        ./.github/scripts/check-version-increment.ps1 -ProjectFile "Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj" -PackageId "Pixelbadger.Toolkit.Rag"
+        ./.github/scripts/check-version-increment.ps1 -ProjectFile "Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj"
 
   build-and-test:
     runs-on: ubuntu-latest

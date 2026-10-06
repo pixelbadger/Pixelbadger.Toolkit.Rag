@@ -1,6 +1,7 @@
-name: Master Build
+name: Publish Container
 
-# Builds, tests and builds the container image. Nothing is published yet: pushing the image to a registry is a follow-up.
+# On merge to master: build and test, then push the image to GHCR and tag the release (v<Version>).
+# The registry login uses the built-in GITHUB_TOKEN; no secrets are needed.
 on:
   push:
     branches: [ master ]
@@ -10,6 +11,12 @@ on:
       - '.dockerignore'
       - '!**/*.Tests/**'
       - '!.github/**'
+  workflow_dispatch:
+
+# Two publishes must not race for the same version tag.
+concurrency:
+  group: publish-container
+  cancel-in-progress: false
 
 jobs:
   build-and-test:
@@ -34,5 +41,81 @@ jobs:
     - name: Test
       run: dotnet test --no-build --configuration Release --verbosity normal
 
-    - name: Build container image (no push)
-      run: docker build --tag pixelbadger-toolkit-rag:${{ github.sha }} .
+  publish:
+    needs: build-and-test
+    # workflow_dispatch can be started from any branch; only master publishes.
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the v<Version> tag
+      packages: write   # push to ghcr.io
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # all tags, to check whether this version was already released
+
+    - name: Read version and image name
+      id: meta
+      run: |
+        version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj | head -n 1)"
+        if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::Could not read a MAJOR.MINOR.PATCH <Version> from Pixelbadger.Toolkit.Rag.csproj (got '$version')."
+          exit 1
+        fi
+        owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "image=ghcr.io/$owner/pixelbadger.toolkit.rag" >> "$GITHUB_OUTPUT"
+
+    - name: Refuse to overwrite a released version
+      env:
+        VERSION: ${{ steps.meta.outputs.version }}
+      run: |
+        if git rev-parse --quiet --verify "refs/tags/v$VERSION" > /dev/null; then
+          echo "::error::Version $VERSION was already released (git tag v$VERSION exists). Bump <Version> in Pixelbadger.Toolkit.Rag.csproj before merging."
+          exit 1
+        fi
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Image tags and labels
+      id: docker-meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.meta.outputs.image }}
+        flavor: |
+          latest=false
+        tags: |
+          type=raw,value=${{ steps.meta.outputs.version }}
+          type=raw,value=latest
+          type=sha,prefix=sha-,format=short
+        labels: |
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.revision=${{ github.sha }}
+          org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          org.opencontainers.image.licenses=MIT
+
+    - name: Build and push
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.docker-meta.outputs.tags }}
+        labels: ${{ steps.docker-meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Tag the release
+      env:
+        VERSION: ${{ steps.meta.outputs.version }}
+      run: |
+        git tag "v$VERSION" "$GITHUB_SHA"
+        git push origin "refs/tags/v$VERSION"
