@@ -5,7 +5,7 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Text;
 
 /// <summary>
-/// EmbeddingGemma 2 embeddings via ONNX Runtime (reference §3-§5, §8). Text goes through the prompt formats,
+/// EmbeddingGemma 2 embeddings via ONNX Runtime. Text goes through the prompt formats,
 /// tokeniser and padded batches; images and audio windows go through their encoders and are merged by the
 /// text graph itself. Every vector is truncated to <see cref="Dimensions"/> and re-normalised in
 /// <see cref="EmbeddingMath"/>. Nothing touches the model files until the first embedding call.

@@ -1,7 +1,7 @@
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Text;
 
 /// <summary>
-/// Builds <c>input_ids</c> sequences for the text model (reference §4, §5). Pure: no tokeniser, no ONNX.
+/// Builds <c>input_ids</c> sequences for the text model. Pure: no tokeniser, no ONNX.
 /// The <c>&lt;bos&gt;</c>/<c>&lt;eos&gt;</c> framing is applied here, exactly once; the tokeniser is asked
 /// for raw ids only (it ignores the post-processor template in tokenizer.json).
 /// </summary>

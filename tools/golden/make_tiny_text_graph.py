@@ -5,7 +5,7 @@ OnnxGemmaTextModel can be tested without the real 1 GB model:
     pip install onnx numpy
     python make_tiny_text_graph.py [out.onnx]
 
-Same I/O contract as the real graph (reference section 3):
+Same I/O contract as the real graph:
   inputs : input_ids int64[b, s], attention_mask int64[b, s],
            image_features / video_features / audio_features float32[n, 512]  (n may be 0)
   output : sentence_embedding float32[b, 768]

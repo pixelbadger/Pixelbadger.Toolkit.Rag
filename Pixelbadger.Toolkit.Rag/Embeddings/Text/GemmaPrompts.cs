@@ -1,6 +1,6 @@
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Text;
 
-/// <summary>Text prompt formats of EmbeddingGemma 2 for search / RAG (reference §5). Media is never prefixed.</summary>
+/// <summary>Text prompt formats of EmbeddingGemma 2 for search / RAG. Media is never prefixed.</summary>
 public static class GemmaPrompts
 {
     public const string NoTitle = "none";

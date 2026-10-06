@@ -21,12 +21,12 @@ A .NET 10 ASP.NET Core app (minimal APIs, v3.x, shipped as a container) for Retr
 
 **Implication for development:** When evaluating search quality or costs, focus on the retrieval operation itself. Don't optimize for "how an LLM might use this" - that's the client's job. We provide fast, accurate document retrieval.
 
-### Key decisions (see `docs/migration/PLAN.md` and `docs/migration/embeddinggemma2-reference.md`)
+### Key decisions
 
 - Embeddings: local `onnx-community/embeddinggemma-2-ONNX`, fp32, 256-d Matryoshka (truncate + re-normalise). **The service never downloads models**; `Rag:ModelPath` / `PBRAG_MODEL_PATH` points at a local copy. No OpenAI.
 - Persistence: SQL Server 2025 / Azure SQL (EF Core 10, `vector(256)`). Lucene is only the BM25 index; everything shown to users is hydrated from SQL.
 - Search: hybrid only. There is no `bm25` / `vector` mode, no search-mode option, no MCP `searchMode`.
-- Ingest: **upload only** (`POST /api/ingest`); the server never reads caller-named paths from its own disk. A file's *logical path* (the multipart filename) is the document identity. Jobs live in SQL and are processed by a hosted worker; one instance owns a Lucene index directory (multi-instance is unsupported). See `docs/migration/ASPNETCORE-PLAN.md`.
+- Ingest: **upload only** (`POST /api/ingest`); the server never reads caller-named paths from its own disk. A file's *logical path* (the multipart filename) is the document identity. Jobs live in SQL and are processed by a hosted worker; one instance owns a Lucene index directory (multi-instance is unsupported).
 - Auth is out of scope.
 - Multimodal: each image / audio file is its own document. Video and images inside documents are out of scope.
 
