@@ -1,6 +1,7 @@
 using FluentAssertions;
 using Microsoft.Data.SqlClient;
 using Pixelbadger.Toolkit.Rag.Domain;
+using Pixelbadger.Toolkit.Rag.Ingestion;
 using Pixelbadger.Toolkit.Rag.Persistence;
 using Pixelbadger.Toolkit.Rag.Tests.Support;
 
@@ -21,9 +22,14 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     }
 
     private static DocumentDraft Doc(string name, Modality modality = Modality.Text, string? hash = null)
+        => new("data/" + name + ".txt", name + ".txt", modality, hash ?? new string('a', 64));
+
+    /// <summary>What the upload endpoint does before the worker ingests: creates the (Queued) document row and its job.</summary>
+    private static async Task<Guid> NewDocAsync(string cs, string name = "doc")
     {
-        var path = "/data/" + name + ".txt";
-        return new DocumentDraft(DocumentIds.FromLogicalPath(path), path, name, name + ".txt", modality, hash ?? new string('a', 64));
+        var queue = new SqlIngestQueue(new SqlStoreOptions { ConnectionString = cs }, new IngestSettings());
+        var upload = new IngestUpload("data/" + name + ".txt", 1, () => new MemoryStream([1]));
+        return (await queue.EnqueueNewDocumentsAsync([upload], 1000)).Single().DocumentId;
     }
 
     private static ChunkDraft Chunk(int ordinal, string seed, string? text = null)
@@ -43,11 +49,19 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     private static Task<int> VectorIndexCountAsync(string cs)
         => ScalarAsync<int>(cs, "SELECT COUNT(*) FROM sys.vector_indexes WHERE object_id = OBJECT_ID(N'dbo.Chunks_EG2_256')");
 
-    /// <summary>Ingests <paramref name="documents"/> x <paramref name="chunksPerDoc"/> deterministic chunks.</summary>
-    private static async Task PopulateAsync(SqlDocumentStore store, int documents, int chunksPerDoc, string prefix = "p")
+    /// <summary>Ingests <paramref name="documents"/> x <paramref name="chunksPerDoc"/> deterministic chunks; returns name to document id.</summary>
+    private static async Task<Dictionary<string, Guid>> PopulateAsync(
+        SqlDocumentStore store, string cs, int documents, int chunksPerDoc, string prefix = "p")
     {
+        var ids = new Dictionary<string, Guid>();
         for (int d = 0; d < documents; d++)
-            await store.ReplaceDocumentAsync(Doc($"{prefix}{d}"), Chunks($"{prefix}{d}", chunksPerDoc));
+        {
+            var name = $"{prefix}{d}";
+            ids[name] = await NewDocAsync(cs, name);
+            await store.ReplaceDocumentAsync(ids[name], Doc(name), Chunks(name, chunksPerDoc));
+        }
+
+        return ids;
     }
 
     [Fact]
@@ -91,17 +105,18 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     [Fact]
     public async Task Replace_InsertsChunksInOrdinalOrder_WithUniqueIds()
     {
-        var (store, _) = await CreateMigratedStoreAsync();
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs, "alpha");
         var draft = Doc("alpha");
         // Deliberately out of order.
         var chunks = new List<ChunkDraft> { Chunk(3, "c"), Chunk(1, "a"), Chunk(2, "b") };
 
-        var records = await store.ReplaceDocumentAsync(draft, chunks);
+        var records = await store.ReplaceDocumentAsync(id, draft, chunks);
 
         records.Select(r => r.Ordinal).Should().Equal(1, 2, 3);
-        records.Select(r => r.ChunkId).Should().OnlyHaveUniqueItems().And.OnlyContain(id => id > 0);
+        records.Select(r => r.ChunkId).Should().OnlyHaveUniqueItems().And.OnlyContain(i => i > 0);
         records.Select(r => r.ChunkGlobalId).Should().OnlyHaveUniqueItems().And.NotContain(Guid.Empty);
-        records.Should().OnlyContain(r => r.DocumentGlobalId == draft.GlobalId && r.SourceId == "alpha" && r.SourcePath == draft.SourcePath);
+        records.Should().OnlyContain(r => r.DocumentGlobalId == id && r.SourcePath == draft.SourcePath);
         records[0].Text.Should().Be("text a");
         records[0].LocatorStart.Should().Be(100);
         records[0].LocatorEnd.Should().Be(199);
@@ -109,13 +124,56 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     }
 
     [Fact]
+    public async Task Replace_UpdatesTheExistingDocument_SetsIndexedAndTheHash()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs, "alpha");
+        (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Queued);
+
+        await store.ReplaceDocumentAsync(id, Doc("alpha"), Chunks("a", 1));
+
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(1);
+        (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Indexed);
+        (await ScalarAsync<string>(cs, "SELECT ContentHash FROM dbo.Documents")).Should().Be(new string('a', 64));
+    }
+
+    [Fact]
+    public async Task Replace_IntoAMissingDocument_Throws_AndWritesNothing()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var unknown = Guid.NewGuid();
+
+        var act = () => store.ReplaceDocumentAsync(unknown, Doc("ghost"), Chunks("g", 2));
+
+        (await act.Should().ThrowAsync<DocumentNotFoundException>()).Which.DocumentId.Should().Be(unknown);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(0);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Replace_AfterTheDocumentWasDeleted_DoesNotResurrectIt()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs, "alpha");
+        await store.ReplaceDocumentAsync(id, Doc("alpha"), Chunks("v1", 2));
+        await store.DeleteDocumentAsync(id);
+
+        var act = () => store.ReplaceDocumentAsync(id, Doc("alpha"), Chunks("v2", 2));
+
+        await act.Should().ThrowAsync<DocumentNotFoundException>();
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(0);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
+    }
+
+    [Fact]
     public async Task Replace_Reingest_ReplacesChunks_KeepsDocumentRow()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs, "alpha");
         var draft = Doc("alpha");
 
-        var first = await store.ReplaceDocumentAsync(draft, Chunks("v1", 3));
-        var second = await store.ReplaceDocumentAsync(draft with { Title = "renamed", ContentHash = new string('b', 64) }, Chunks("v2", 2));
+        var first = await store.ReplaceDocumentAsync(id, draft, Chunks("v1", 3));
+        var second = await store.ReplaceDocumentAsync(id, draft with { Title = "renamed", ContentHash = new string('b', 64) }, Chunks("v2", 2));
 
         second.Should().HaveCount(2);
         second.Select(r => r.DocumentId).Distinct().Should().Equal(first[0].DocumentId); // stable document row
@@ -133,8 +191,9 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     public async Task Replace_WithNoChunks_RemovesOldChunks()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
-        await store.ReplaceDocumentAsync(Doc("alpha"), Chunks("a", 3));
-        await store.ReplaceDocumentAsync(Doc("alpha"), []);
+        var id = await NewDocAsync(cs, "alpha");
+        await store.ReplaceDocumentAsync(id, Doc("alpha"), Chunks("a", 3));
+        await store.ReplaceDocumentAsync(id, Doc("alpha"), []);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(1);
     }
@@ -143,40 +202,63 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     public async Task Replace_RejectsWrongEmbeddingSize_AndLeavesStoreUntouched()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs, "alpha");
         var bad = new List<ChunkDraft> { new(1, Modality.Text, null, null, "x", new float[10]) };
 
-        var act = () => store.ReplaceDocumentAsync(Doc("alpha"), bad);
+        var act = () => store.ReplaceDocumentAsync(id, Doc("alpha"), bad);
 
         await act.Should().ThrowAsync<ArgumentException>();
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(0);
+        (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Queued);
     }
 
     [Fact]
     public async Task Replace_IsAtomic_FailureRollsBackDeletedChunks()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs, "alpha");
         var draft = Doc("alpha");
-        await store.ReplaceDocumentAsync(draft, Chunks("v1", 3));
+        await store.ReplaceDocumentAsync(id, draft, Chunks("v1", 3));
 
-        // SourceId is nvarchar(256): an oversized value fails the document update inside the transaction.
-        var act = () => store.ReplaceDocumentAsync(draft with { SourceId = new string('x', 300) }, Chunks("v2", 2));
+        // Title is nvarchar(1000): an oversized value fails the document update inside the transaction.
+        var act = () => store.ReplaceDocumentAsync(id, draft with { Title = new string('x', 1200) }, Chunks("v2", 2));
         await act.Should().ThrowAsync<Exception>();
 
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(3);
-        (await ScalarAsync<string>(cs, "SELECT SourceId FROM dbo.Documents")).Should().Be("alpha");
+        (await ScalarAsync<string>(cs, "SELECT Title FROM dbo.Documents")).Should().Be("alpha.txt");
     }
 
     [Fact]
-    public async Task DeletingDocument_CascadesToChunks()
+    public async Task DeleteDocument_RemovesChunksAndJobs_LeavesOthers_AndReportsUnknownIds()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
-        await store.ReplaceDocumentAsync(Doc("alpha"), Chunks("a", 3));
-        await store.ReplaceDocumentAsync(Doc("beta"), Chunks("b", 2));
+        var alpha = await NewDocAsync(cs, "alpha");
+        var beta = await NewDocAsync(cs, "beta");
+        await store.ReplaceDocumentAsync(alpha, Doc("alpha"), Chunks("a", 3));
+        await store.ReplaceDocumentAsync(beta, Doc("beta"), Chunks("b", 2));
+
+        (await store.DeleteDocumentAsync(alpha)).Should().BeTrue();
+
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(2);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(1);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs")).Should().Be(1);
+        (await store.DeleteDocumentAsync(alpha)).Should().BeFalse();
+        (await store.DeleteDocumentAsync(Guid.NewGuid())).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task DeletingDocument_ByRawSql_CascadesToChunks()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var alpha = await NewDocAsync(cs, "alpha");
+        var beta = await NewDocAsync(cs, "beta");
+        await store.ReplaceDocumentAsync(alpha, Doc("alpha"), Chunks("a", 3));
+        await store.ReplaceDocumentAsync(beta, Doc("beta"), Chunks("b", 2));
 
         await using (var conn = new SqlConnection(cs))
         {
             await conn.OpenAsync();
-            await using var del = new SqlCommand("DELETE FROM dbo.Documents WHERE SourceId = 'alpha'", conn);
+            await using var del = new SqlCommand("DELETE FROM dbo.IngestJobs; DELETE FROM dbo.Documents WHERE GlobalId = @g", conn);
+            del.Parameters.AddWithValue("@g", alpha);
             await del.ExecuteNonQueryAsync();
         }
 
@@ -187,36 +269,38 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     public async Task SetIndexStatus_UpdatesDocument_AndIgnoresUnknownIds()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs, "alpha");
         var draft = Doc("alpha");
-        await store.ReplaceDocumentAsync(draft, Chunks("a", 1));
+        await store.ReplaceDocumentAsync(id, draft, Chunks("a", 1));
         (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Indexed);
 
-        await store.SetIndexStatusAsync(draft.GlobalId, IndexStatus.Failed);
+        await store.SetIndexStatusAsync(id, IndexStatus.Failed);
         (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Failed);
 
-        await store.SetIndexStatusAsync("doc_missing", IndexStatus.Queued);
+        await store.SetIndexStatusAsync(Guid.NewGuid(), IndexStatus.Queued);
         (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Failed);
 
         // Re-ingest flips it back to Indexed.
-        await store.ReplaceDocumentAsync(draft, Chunks("a", 1));
+        await store.ReplaceDocumentAsync(id, draft, Chunks("a", 1));
         (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Indexed);
     }
 
     [Fact]
     public async Task GetChunks_HydratesRecords_AndOmitsMissingIds()
     {
-        var (store, _) = await CreateMigratedStoreAsync();
-        var draft = Doc("alpha", Modality.Text);
-        var written = await store.ReplaceDocumentAsync(draft, Chunks("a", 3));
-        var image = await store.ReplaceDocumentAsync(Doc("pic", Modality.Image),
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var alphaId = await NewDocAsync(cs, "alpha");
+        var picId = await NewDocAsync(cs, "pic");
+        var written = await store.ReplaceDocumentAsync(alphaId, Doc("alpha", Modality.Text), Chunks("a", 3));
+        var image = await store.ReplaceDocumentAsync(picId, Doc("pic", Modality.Image),
             [new ChunkDraft(1, Modality.Image, null, null, null, MockEmbeddingService.Vector("img"))]);
 
         var ids = written.Select(r => r.ChunkId).Append(image[0].ChunkId).Append(int.MaxValue).ToList();
         var hydrated = await store.GetChunksAsync(ids);
 
         hydrated.Should().HaveCount(4);
-        hydrated.Where(h => h.SourceId == "alpha").Should().BeEquivalentTo(written);
-        var pic = hydrated.Single(h => h.SourceId == "pic");
+        hydrated.Where(h => h.DocumentGlobalId == alphaId).Should().BeEquivalentTo(written);
+        var pic = hydrated.Single(h => h.DocumentGlobalId == picId);
         pic.Modality.Should().Be(Modality.Image);
         pic.Text.Should().BeNull();
         pic.LocatorStart.Should().BeNull();
@@ -228,8 +312,8 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     [Fact]
     public async Task ExactSearch_ReturnsNearestFirst_WithCosineDistance()
     {
-        var (store, _) = await CreateMigratedStoreAsync();
-        await PopulateAsync(store, documents: 5, chunksPerDoc: 4); // below 100 rows: exact path
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var ids = await PopulateAsync(store, cs, documents: 5, chunksPerDoc: 4); // below 100 rows: exact path
 
         var target = Chunk(1, "p3-2");
         var hits = await store.SearchAsync(target.Embedding, 5, null);
@@ -240,7 +324,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         store.LastSearchPath.Should().Be(SqlDocumentStore.SearchPath.Exact);
 
         var top = (await store.GetChunksAsync([hits[0].ChunkId])).Single();
-        top.SourceId.Should().Be("p3");
+        top.DocumentGlobalId.Should().Be(ids["p3"]);
         top.Ordinal.Should().Be(2);
 
         // Opposite vector -> cosine distance ~2 for the same chunk.
@@ -254,10 +338,10 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     [Fact]
     public async Task Search_FewerRowsThanMaxResults_ReturnsAll_AndEmptyStoreReturnsNothing()
     {
-        var (store, _) = await CreateMigratedStoreAsync();
+        var (store, cs) = await CreateMigratedStoreAsync();
         (await store.SearchAsync(MockEmbeddingService.Vector("q"), 5, null)).Should().BeEmpty();
 
-        await store.ReplaceDocumentAsync(Doc("alpha"), Chunks("a", 2));
+        await store.ReplaceDocumentAsync(await NewDocAsync(cs, "alpha"), Doc("alpha"), Chunks("a", 2));
         (await store.SearchAsync(MockEmbeddingService.Vector("q"), 5, null)).Should().HaveCount(2);
         (await store.SearchAsync(MockEmbeddingService.Vector("q"), 0, null)).Should().BeEmpty();
     }
@@ -271,21 +355,21 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     }
 
     [Fact]
-    public async Task Search_SourceIdFilter_RestrictsResults()
+    public async Task Search_DocumentIdFilter_RestrictsResults()
     {
-        var (store, _) = await CreateMigratedStoreAsync();
-        await PopulateAsync(store, documents: 4, chunksPerDoc: 3);
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var ids = await PopulateAsync(store, cs, documents: 4, chunksPerDoc: 3);
         var query = MockEmbeddingService.Vector("p0-1"); // best match lives in p0
 
         var unfiltered = await store.SearchAsync(query, 3, null);
-        (await store.GetChunksAsync([unfiltered[0].ChunkId])).Single().SourceId.Should().Be("p0");
+        (await store.GetChunksAsync([unfiltered[0].ChunkId])).Single().DocumentGlobalId.Should().Be(ids["p0"]);
 
-        var filtered = await store.SearchAsync(query, 10, ["p1", "p2"]);
+        var filtered = await store.SearchAsync(query, 10, [ids["p1"], ids["p2"]]);
         filtered.Should().HaveCount(6);
-        var sources = (await store.GetChunksAsync(filtered.Select(h => h.ChunkId).ToList())).Select(c => c.SourceId).Distinct();
-        sources.Should().BeEquivalentTo(["p1", "p2"]);
+        var documents = (await store.GetChunksAsync(filtered.Select(h => h.ChunkId).ToList())).Select(c => c.DocumentGlobalId).Distinct();
+        documents.Should().BeEquivalentTo([ids["p1"], ids["p2"]]);
 
-        (await store.SearchAsync(query, 10, ["nope"])).Should().BeEmpty();
+        (await store.SearchAsync(query, 10, [Guid.NewGuid()])).Should().BeEmpty();
         (await store.SearchAsync(query, 10, [])).Should().HaveCount(10); // empty filter = no filter
     }
 
@@ -297,11 +381,11 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         await store.EnsureVectorIndexAsync(); // empty table: must not throw
         (await VectorIndexCountAsync(cs)).Should().Be(0);
 
-        await PopulateAsync(store, documents: 33, chunksPerDoc: 3); // 99 rows
+        await PopulateAsync(store, cs, documents: 33, chunksPerDoc: 3); // 99 rows
         await store.EnsureVectorIndexAsync();
         (await VectorIndexCountAsync(cs)).Should().Be(0);
 
-        await store.ReplaceDocumentAsync(Doc("extra"), Chunks("extra", 1)); // 100 rows
+        await store.ReplaceDocumentAsync(await NewDocAsync(cs, "extra"), Doc("extra"), Chunks("extra", 1)); // 100 rows
         await store.EnsureVectorIndexAsync();
         store.LastVectorIndexError.Should().BeNull();
         (await VectorIndexCountAsync(cs)).Should().Be(1);
@@ -315,7 +399,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     public async Task EnsureVectorIndex_EnablesPreviewFeatures_WhenOff()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
-        await PopulateAsync(store, documents: 10, chunksPerDoc: 10);
+        await PopulateAsync(store, cs, documents: 10, chunksPerDoc: 10);
         await using (var conn = new SqlConnection(cs))
         {
             await conn.OpenAsync();
@@ -336,7 +420,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         var cs = await sql.CreateDatabaseAsync();
         var store = NewStore(cs, VectorSearchMode.ExactOnly);
         await store.MigrateAsync();
-        await PopulateAsync(store, documents: 12, chunksPerDoc: 10);
+        await PopulateAsync(store, cs, documents: 12, chunksPerDoc: 10);
 
         await store.EnsureVectorIndexAsync();
         (await VectorIndexCountAsync(cs)).Should().Be(0);
@@ -349,7 +433,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     public async Task ApproximateSearch_AgreesWithExact_AtThreeHundredRows()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
-        await PopulateAsync(store, documents: 30, chunksPerDoc: 10); // 300 rows
+        await PopulateAsync(store, cs, documents: 30, chunksPerDoc: 10); // 300 rows
         await store.EnsureVectorIndexAsync();
         store.LastVectorIndexError.Should().BeNull();
         (await VectorIndexCountAsync(cs)).Should().Be(1);
@@ -380,23 +464,23 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     }
 
     [Fact]
-    public async Task ApproximateSearch_WithSourceFilter_ReturnsOnlyMatchingSources_EvenWhenSelective()
+    public async Task ApproximateSearch_WithDocumentFilter_ReturnsOnlyMatchingDocuments_EvenWhenSelective()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
-        await PopulateAsync(store, documents: 30, chunksPerDoc: 10);
+        var ids = await PopulateAsync(store, cs, documents: 30, chunksPerDoc: 10);
         await store.EnsureVectorIndexAsync();
         var query = MockEmbeddingService.Vector("filter-query");
 
-        var filtered = await store.SearchAsync(query, 5, ["p3", "p9"]);
+        var filtered = await store.SearchAsync(query, 5, [ids["p3"], ids["p9"]]);
         filtered.Should().HaveCount(5);
-        (await store.GetChunksAsync(filtered.Select(h => h.ChunkId).ToList())).Select(c => c.SourceId)
-            .Should().OnlyContain(s => s == "p3" || s == "p9");
+        (await store.GetChunksAsync(filtered.Select(h => h.ChunkId).ToList())).Select(c => c.DocumentGlobalId)
+            .Should().OnlyContain(d => d == ids["p3"] || d == ids["p9"]);
 
         // Fewer matching rows than requested: must fall back to exact and return all of them.
-        var all = await store.SearchAsync(query, 50, ["p3"]);
+        var all = await store.SearchAsync(query, 50, [ids["p3"]]);
         all.Should().HaveCount(10);
 
-        var truth = await NewStore(cs, VectorSearchMode.ExactOnly).SearchAsync(query, 10, ["p3"]);
+        var truth = await NewStore(cs, VectorSearchMode.ExactOnly).SearchAsync(query, 10, [ids["p3"]]);
         all.Select(h => h.ChunkId).Should().BeEquivalentTo(truth.Select(h => h.ChunkId));
     }
 
@@ -404,18 +488,18 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     public async Task Replace_WithVectorIndexPresent_StillWorks_AndSearchRemainsCorrect()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
-        await PopulateAsync(store, documents: 12, chunksPerDoc: 10);
+        var ids = await PopulateAsync(store, cs, documents: 12, chunksPerDoc: 10);
         await store.EnsureVectorIndexAsync();
         (await VectorIndexCountAsync(cs)).Should().Be(1);
 
         // On SQL Server 2025 RTM-CU9 the pre-v3 index makes the table read-only; the store must cope
         // (dropping the index first), and on v3-capable servers it must keep the index.
         var replacement = Chunk(1, "fresh-vector");
-        await store.ReplaceDocumentAsync(Doc("p4"), [replacement]);
+        await store.ReplaceDocumentAsync(ids["p4"], Doc("p4"), [replacement]);
 
         var hits = await store.SearchAsync(replacement.Embedding, 3, null);
         hits[0].Distance.Should().BeApproximately(0f, 1e-3f);
-        (await store.GetChunksAsync([hits[0].ChunkId])).Single().SourceId.Should().Be("p4");
+        (await store.GetChunksAsync([hits[0].ChunkId])).Single().DocumentGlobalId.Should().Be(ids["p4"]);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(111);
 
         // The ingester calls Ensure after each batch: the index comes back.
@@ -424,10 +508,27 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     }
 
     [Fact]
+    public async Task DeleteDocument_WithVectorIndexPresent_StillWorks()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var ids = await PopulateAsync(store, cs, documents: 12, chunksPerDoc: 10);
+        await store.EnsureVectorIndexAsync();
+        (await VectorIndexCountAsync(cs)).Should().Be(1);
+
+        // A pre-v3 index makes the chunk table read-only (deletes fail too); the store drops it first.
+        (await store.DeleteDocumentAsync(ids["p2"])).Should().BeTrue();
+
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(110);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(11);
+        await store.EnsureVectorIndexAsync();
+        (await VectorIndexCountAsync(cs)).Should().Be(1);
+    }
+
+    [Fact]
     public async Task SearchPath_ChosenByAnotherInstance_SeesExistingIndex()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
-        await PopulateAsync(store, documents: 12, chunksPerDoc: 10);
+        await PopulateAsync(store, cs, documents: 12, chunksPerDoc: 10);
         await store.EnsureVectorIndexAsync();
 
         var fresh = NewStore(cs);

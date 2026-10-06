@@ -4,57 +4,103 @@ using Pixelbadger.Toolkit.Rag.Ingestion;
 namespace Pixelbadger.Toolkit.Rag.Tests.Ingestion;
 
 /// <summary>
-/// In-memory <see cref="IIngestQueue"/> with the same claim/lease/attempt semantics as <see cref="SqlIngestQueue"/>,
-/// so the worker's behaviour can be tested without SQL Server.
+/// In-memory <see cref="IIngestQueue"/> with the same document/job, claim, lease, attempt and re-ingest semantics as
+/// <see cref="SqlIngestQueue"/>, so the worker's behaviour can be tested without SQL Server.
 /// </summary>
 public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
 {
-    private sealed class File
+    private sealed class Doc
     {
-        public int Id;
-        public int Ordinal;
+        public Guid Id = Guid.CreateVersion7();
         public string Path = "";
-        public byte[]? Content;
-        public IngestFileStatus Status;
-        public string? DocumentId;
-        public Modality? Modality;
-        public int? ChunkCount;
-        public string? Error;
+        public Modality Modality;
+        public IndexStatus Status;
+        public DateTime Updated = DateTime.UtcNow;
+        public List<Job> Jobs = new();
     }
 
     private sealed class Job
     {
         public Guid Id = Guid.CreateVersion7();
+        public Doc Doc = null!;
         public IngestJobStatus Status;
         public int Attempts;
         public int MaxChunk;
+        public string Path = "";
+        public byte[]? Content;
+        public int? ChunkCount;
         public DateTime Created = DateTime.UtcNow;
         public DateTime? Started;
         public DateTime? Completed;
         public DateTime? LeaseExpires;
         public string? LeaseOwner;
         public string? Error;
-        public List<File> Files = new();
     }
 
     private readonly object _gate = new();
-    private readonly List<Job> _jobs = new();
-    private int _nextFileId = 1;
+    private readonly List<Doc> _docs = new();
 
-    public async Task<Guid> EnqueueAsync(IReadOnlyList<IngestUpload> files, int maxChunkCharacters, CancellationToken cancellationToken = default)
+    /// <summary>Fails the next <see cref="EnqueueNewDocumentsAsync"/> after storing this many uploads (atomicity tests).</summary>
+    public int? FailEnqueueAfter { get; set; }
+
+    public async Task<IReadOnlyList<EnqueuedDocument>> EnqueueNewDocumentsAsync(
+        IReadOnlyList<IngestUpload> uploads, int maxChunkCharacters, CancellationToken cancellationToken = default)
     {
-        var job = new Job { Status = IngestJobStatus.Queued, MaxChunk = maxChunkCharacters };
-        foreach (var upload in files)
+        var created = new List<(Doc Doc, Job Job)>();
+        foreach (var upload in uploads)
         {
-            using var buffer = new MemoryStream();
-            await using (var source = upload.OpenRead())
-                await source.CopyToAsync(buffer, cancellationToken);
-            lock (_gate)
-                job.Files.Add(new File { Id = _nextFileId++, Ordinal = job.Files.Count, Path = upload.LogicalPath, Content = buffer.ToArray() });
+            if (FailEnqueueAfter == created.Count)
+                throw new IOException("simulated enqueue failure");
+
+            var content = await ReadAllAsync(upload, cancellationToken);
+            var doc = new Doc { Path = upload.LogicalPath, Modality = MediaTypes.GetModality(upload.LogicalPath)!.Value, Status = IndexStatus.Queued };
+            var job = new Job { Doc = doc, Status = IngestJobStatus.Queued, MaxChunk = maxChunkCharacters, Path = upload.LogicalPath, Content = content };
+            doc.Jobs.Add(job);
+            created.Add((doc, job));
         }
 
-        lock (_gate) _jobs.Add(job);
-        return job.Id;
+        // All or nothing, like the SQL transaction.
+        lock (_gate) _docs.AddRange(created.Select(c => c.Doc));
+        return created.Select(c => new EnqueuedDocument(c.Doc.Id, c.Job.Id)).ToList();
+    }
+
+    public async Task<ReingestResult> EnqueueReingestAsync(
+        Guid documentId, IngestUpload upload, int maxChunkCharacters, CancellationToken cancellationToken = default)
+    {
+        var content = await ReadAllAsync(upload, cancellationToken);
+        lock (_gate)
+        {
+            var doc = _docs.SingleOrDefault(d => d.Id == documentId);
+            if (doc is null)
+                return new ReingestResult(ReingestOutcome.NotFound);
+
+            var active = doc.Jobs.Where(j => !IngestJob.IsTerminal(j.Status)).OrderByDescending(j => j.Status).FirstOrDefault();
+            if (active?.Status == IngestJobStatus.Processing)
+                return new ReingestResult(ReingestOutcome.Conflict);
+
+            ReingestOutcome outcome;
+            if (active is not null)
+            {
+                active.Content = content;
+                active.Path = upload.LogicalPath;
+                active.MaxChunk = maxChunkCharacters;
+                active.Attempts = 0;
+                active.Error = null;
+                outcome = ReingestOutcome.ReplacedQueued;
+            }
+            else
+            {
+                active = new Job { Doc = doc, Status = IngestJobStatus.Queued, MaxChunk = maxChunkCharacters, Path = upload.LogicalPath, Content = content };
+                doc.Jobs.Add(active);
+                outcome = ReingestOutcome.Created;
+            }
+
+            doc.Path = upload.LogicalPath;
+            doc.Modality = MediaTypes.GetModality(upload.LogicalPath)!.Value;
+            doc.Status = IndexStatus.Queued;
+            doc.Updated = DateTime.UtcNow;
+            return new ReingestResult(outcome, active.Id);
+        }
     }
 
     public Task<IngestJobClaim?> TryClaimNextAsync(string owner, TimeSpan lease, CancellationToken cancellationToken = default)
@@ -62,10 +108,11 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         lock (_gate)
         {
             var now = DateTime.UtcNow;
-            foreach (var dead in _jobs.Where(j => j.Status == IngestJobStatus.Processing && j.LeaseExpires < now && j.Attempts >= settings.MaxAttempts))
+            var jobs = _docs.SelectMany(d => d.Jobs).ToList();
+            foreach (var dead in jobs.Where(j => j.Status == IngestJobStatus.Processing && j.LeaseExpires < now && j.Attempts >= settings.MaxAttempts))
                 Fail(dead, dead.Error ?? "abandoned");
 
-            var next = _jobs.OrderBy(j => j.Created)
+            var next = jobs.OrderBy(j => j.Created)
                 .FirstOrDefault(j => j.Status == IngestJobStatus.Queued
                     || (j.Status == IngestJobStatus.Processing && j.LeaseExpires < now && j.Attempts < settings.MaxAttempts));
             if (next is null)
@@ -77,76 +124,61 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
             next.LeaseExpires = now + lease;
             next.Started ??= now;
             next.Error = null;
-            return Task.FromResult<IngestJobClaim?>(new IngestJobClaim(next.Id, next.Attempts, next.MaxChunk));
+            next.Doc.Status = IndexStatus.Processing;
+            return Task.FromResult<IngestJobClaim?>(new IngestJobClaim(
+                next.Id, next.Doc.Id, next.Attempts, next.MaxChunk, next.Path, next.Content!.Length));
         }
     }
 
-    public Task<IReadOnlyList<PendingIngestFile>> GetPendingFilesAsync(Guid jobId, CancellationToken cancellationToken = default)
-    {
-        lock (_gate)
-        {
-            return Task.FromResult<IReadOnlyList<PendingIngestFile>>(Find(jobId).Files
-                .Where(f => f.Status == IngestFileStatus.Queued).OrderBy(f => f.Ordinal)
-                .Select(f => new PendingIngestFile(f.Id, f.Ordinal, f.Path, f.Content!.Length)).ToList());
-        }
-    }
-
-    public async Task ReadFileContentAsync(int fileId, Stream destination, CancellationToken cancellationToken = default)
+    public async Task ReadContentAsync(Guid jobId, Stream destination, CancellationToken cancellationToken = default)
     {
         byte[] content;
         lock (_gate)
-            content = _jobs.SelectMany(j => j.Files).Single(f => f.Id == fileId).Content
-                ?? throw new InvalidOperationException("content cleared");
+            content = FindJob(jobId)?.Content ?? throw new InvalidOperationException("content not available");
         await destination.WriteAsync(content, cancellationToken);
-    }
-
-    public Task CompleteFileAsync(int fileId, IngestFileOutcome outcome, CancellationToken cancellationToken = default)
-    {
-        lock (_gate)
-        {
-            var file = _jobs.SelectMany(j => j.Files).Single(f => f.Id == fileId);
-            file.Status = outcome.Status;
-            file.DocumentId = outcome.DocumentGlobalId;
-            file.Modality = outcome.Modality;
-            file.ChunkCount = outcome.ChunkCount;
-            file.Error = outcome.Error;
-            file.Content = null;
-        }
-
-        return Task.CompletedTask;
     }
 
     public Task<bool> ExtendLeaseAsync(Guid jobId, string owner, TimeSpan lease, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            var job = Find(jobId);
-            if (job.Status != IngestJobStatus.Processing || job.LeaseOwner != owner)
+            var job = FindJob(jobId);
+            if (job is null || job.Status != IngestJobStatus.Processing || job.LeaseOwner != owner)
                 return Task.FromResult(false);
             job.LeaseExpires = DateTime.UtcNow + lease;
             return Task.FromResult(true);
         }
     }
 
-    public Task CompleteJobAsync(Guid jobId, CancellationToken cancellationToken = default)
+    public Task CompleteAsync(Guid jobId, IngestJobOutcome outcome, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            var job = Find(jobId);
-            job.Status = IngestJobStatus.Completed;
+            var job = FindJob(jobId);
+            if (job is null)
+                return Task.CompletedTask;
+
+            job.Status = outcome.Status;
+            job.ChunkCount = outcome.ChunkCount;
+            job.Error = outcome.Error;
+            job.Content = null;
             job.Completed = DateTime.UtcNow;
             job.LeaseOwner = null;
             job.LeaseExpires = null;
+            job.Doc.Status = outcome.Status == IngestJobStatus.Failed ? IndexStatus.Failed : IndexStatus.Indexed;
         }
 
         return Task.CompletedTask;
     }
 
-    public Task<IngestJobStatus> FailJobAsync(Guid jobId, string error, CancellationToken cancellationToken = default)
+    public Task<IngestJobStatus> FailAsync(Guid jobId, string error, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            var job = Find(jobId);
+            var job = FindJob(jobId);
+            if (job is null)
+                return Task.FromResult(IngestJobStatus.Failed);
+
             if (job.Attempts >= settings.MaxAttempts)
             {
                 Fail(job, error);
@@ -157,51 +189,76 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
                 job.Error = error;
                 job.LeaseOwner = null;
                 job.LeaseExpires = null;
+                job.Doc.Status = IndexStatus.Queued;
             }
 
             return Task.FromResult(job.Status);
         }
     }
 
-    public Task<IngestJobStatusDto?> GetJobAsync(Guid jobId, CancellationToken cancellationToken = default)
+    public Task<int> ResetInFlightJobsAsync(CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            var job = _jobs.SingleOrDefault(j => j.Id == jobId);
-            if (job is null)
-                return Task.FromResult<IngestJobStatusDto?>(null);
+            var processing = _docs.SelectMany(d => d.Jobs).Where(j => j.Status == IngestJobStatus.Processing).ToList();
+            foreach (var job in processing)
+            {
+                job.Status = IngestJobStatus.Queued;
+                job.LeaseOwner = null;
+                job.LeaseExpires = null;
+                job.Doc.Status = IndexStatus.Queued;
+            }
 
-            var files = job.Files.OrderBy(f => f.Ordinal)
-                .Select(f => new IngestFileStatusDto(f.Path, f.Status, f.DocumentId, f.Modality, f.ChunkCount, f.Error)).ToList();
-            return Task.FromResult<IngestJobStatusDto?>(new IngestJobStatusDto(
-                job.Id, job.Status, job.Attempts, job.Created, job.Started, job.Completed, job.Error, files,
-                new IngestJobSummaryDto(
-                    files.Count(f => f.Status == IngestFileStatus.Succeeded),
-                    files.Count(f => f.Status == IngestFileStatus.Failed),
-                    files.Count(f => f.Status == IngestFileStatus.Skipped))));
+            return Task.FromResult(processing.Count);
         }
     }
 
-    /// <summary>True when every file of the job has had its bytes discarded.</summary>
-    public bool AllContentCleared(Guid jobId)
+    public Task<DocumentDto?> GetDocumentAsync(Guid documentId, CancellationToken cancellationToken = default)
     {
-        lock (_gate) return Find(jobId).Files.All(f => f.Content is null);
+        lock (_gate)
+        {
+            var doc = _docs.SingleOrDefault(d => d.Id == documentId);
+            if (doc is null)
+                return Task.FromResult<DocumentDto?>(null);
+
+            var latest = doc.Jobs.OrderByDescending(j => j.Created).ThenByDescending(j => j.Id).FirstOrDefault();
+            var chunks = doc.Jobs.Where(j => j.Status == IngestJobStatus.Succeeded).Select(j => j.ChunkCount ?? 0).LastOrDefault();
+            return Task.FromResult<DocumentDto?>(new DocumentDto(
+                doc.Id, doc.Path, Path.GetFileName(doc.Path), doc.Modality, doc.Status, chunks, doc.Updated,
+                latest is null ? null : new IngestJobDto(latest.Id, latest.Status, latest.Attempts, latest.Created, latest.Started, latest.Completed, latest.Error)));
+        }
     }
 
-    private Job Find(Guid jobId) => _jobs.Single(j => j.Id == jobId);
+    /// <summary>Simulates the SQL cascade of a document delete (the document and all its jobs vanish).</summary>
+    public bool RemoveDocument(Guid documentId)
+    {
+        lock (_gate) return _docs.RemoveAll(d => d.Id == documentId) > 0;
+    }
+
+    /// <summary>True when every job's bytes have been discarded.</summary>
+    public bool AllContentCleared()
+    {
+        lock (_gate) return _docs.SelectMany(d => d.Jobs).All(j => j.Content is null);
+    }
+
+    private Job? FindJob(Guid jobId) => _docs.SelectMany(d => d.Jobs).SingleOrDefault(j => j.Id == jobId);
+
+    private static async Task<byte[]> ReadAllAsync(IngestUpload upload, CancellationToken cancellationToken)
+    {
+        using var buffer = new MemoryStream();
+        await using var source = upload.OpenRead();
+        await source.CopyToAsync(buffer, cancellationToken);
+        return buffer.ToArray();
+    }
 
     private static void Fail(Job job, string error)
     {
         job.Status = IngestJobStatus.Failed;
         job.Completed = DateTime.UtcNow;
         job.Error = error;
+        job.Content = null;
         job.LeaseOwner = null;
         job.LeaseExpires = null;
-        foreach (var file in job.Files.Where(f => f.Status == IngestFileStatus.Queued))
-        {
-            file.Status = IngestFileStatus.Failed;
-            file.Error = "The job failed before this file was processed.";
-            file.Content = null;
-        }
+        job.Doc.Status = IndexStatus.Failed;
     }
 }

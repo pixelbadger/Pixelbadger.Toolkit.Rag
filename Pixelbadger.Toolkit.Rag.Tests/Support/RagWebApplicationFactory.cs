@@ -8,12 +8,13 @@ using Microsoft.Extensions.Hosting;
 using Moq;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Support;
 
 /// <summary>
-/// The real web host with in-memory configuration. By default the hosted services (migrations, ingest worker) are
-/// removed and <see cref="ISearchService"/> / <see cref="IIngestQueue"/> are mocks, so tests need neither SQL nor a model.
+/// The real web host with in-memory configuration. By default the hosted services (migrations, recovery, ingest worker)
+/// are removed and <see cref="ISearchService"/> / <see cref="IIngestQueue"/> / <see cref="IDocumentStore"/> / <see cref="ILuceneRepository"/> are mocks, so tests need neither SQL nor a model.
 /// </summary>
 public sealed class RagWebApplicationFactory : WebApplicationFactory<Program>
 {
@@ -23,10 +24,15 @@ public sealed class RagWebApplicationFactory : WebApplicationFactory<Program>
 
     public Mock<IIngestQueue> Queue { get; } = new();
 
-    /// <summary>Extra configuration (e.g. <c>Rag:Ingest:MaxFilesPerJob</c>) applied on top of the defaults.</summary>
+    /// <summary>Behind the real <c>DocumentService</c> (document delete).</summary>
+    public Mock<IDocumentStore> Store { get; } = new();
+
+    public Mock<ILuceneRepository> Lucene { get; } = new();
+
+    /// <summary>Extra configuration (e.g. <c>Rag:Ingest:MaxFilesPerRequest</c>) applied on top of the defaults.</summary>
     public Dictionary<string, string?> Settings { get; } = new();
 
-    /// <summary>When false (default) the search service and queue are the mocks above.</summary>
+    /// <summary>When false (default) the search service, queue, store and Lucene repository are the mocks above.</summary>
     public bool UseRealServices { get; init; }
 
     /// <summary>When false (default) all hosted services are removed.</summary>
@@ -77,6 +83,10 @@ public sealed class RagWebApplicationFactory : WebApplicationFactory<Program>
                 services.AddSingleton(Search.Object);
                 services.RemoveAll<IIngestQueue>();
                 services.AddSingleton(Queue.Object);
+                services.RemoveAll<IDocumentStore>();
+                services.AddSingleton(Store.Object);
+                services.RemoveAll<ILuceneRepository>();
+                services.AddSingleton(Lucene.Object);
             }
         });
     }

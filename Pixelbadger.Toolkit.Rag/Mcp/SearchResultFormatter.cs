@@ -53,7 +53,6 @@ public static class SearchResultFormatter
             sb.AppendLine($"Chunk ID: {r.ChunkId}");
             sb.AppendLine($"Document ID: {r.DocumentId}");
             sb.AppendLine($"Source: {r.SourceFile} (chunk {r.Ordinal})");
-            sb.AppendLine($"Source ID: {r.SourceId}");
             sb.AppendLine($"Modality: {r.Modality}");
             sb.AppendLine($"Locator: {FormatLocator(r)}");
             var marker = FormatMediaMarker(r);

@@ -42,11 +42,12 @@ public class RagConfigurationTests : IDisposable
         options.Model.ModelPath.Should().Be(ModelDir);
         options.ApplyMigrationsOnStartup.Should().BeTrue();
         options.Ingest.MaxFileSizeBytes.Should().Be(10 * 1024 * 1024);
-        options.Ingest.MaxFilesPerJob.Should().Be(100);
+        options.Ingest.MaxFilesPerRequest.Should().Be(100);
         options.Ingest.MaxChunkCharacters.Should().Be(20000);
         options.Ingest.MaxAttempts.Should().Be(3);
         options.Ingest.LeaseSeconds.Should().Be(600);
         options.Ingest.PollIntervalSeconds.Should().Be(2);
+        options.Ingest.CancelTimeout.Should().Be(TimeSpan.FromSeconds(30));
     }
 
     [Fact]
@@ -66,20 +67,22 @@ public class RagConfigurationTests : IDisposable
             ("Rag:ExactVectorSearch", "true"),
             ("Rag:ApplyMigrationsOnStartup", "false"),
             ("Rag:Ingest:MaxFileSizeBytes", "2048"),
-            ("Rag:Ingest:MaxFilesPerJob", "5"),
+            ("Rag:Ingest:MaxFilesPerRequest", "5"),
             ("Rag:Ingest:MaxChunkCharacters", "900"),
             ("Rag:Ingest:MaxAttempts", "7"),
             ("Rag:Ingest:LeaseSeconds", "30"),
-            ("Rag:Ingest:PollIntervalSeconds", "9")));
+            ("Rag:Ingest:PollIntervalSeconds", "9"),
+            ("Rag:Ingest:CancelTimeoutSeconds", "4")));
 
         options.Sql.SearchMode.Should().Be(VectorSearchMode.ExactOnly);
         options.ApplyMigrationsOnStartup.Should().BeFalse();
         options.Ingest.MaxFileSizeBytes.Should().Be(2048);
-        options.Ingest.MaxFilesPerJob.Should().Be(5);
+        options.Ingest.MaxFilesPerRequest.Should().Be(5);
         options.Ingest.MaxChunkCharacters.Should().Be(900);
         options.Ingest.MaxAttempts.Should().Be(7);
         options.Ingest.Lease.Should().Be(TimeSpan.FromSeconds(30));
         options.Ingest.PollInterval.Should().Be(TimeSpan.FromSeconds(9));
+        options.Ingest.CancelTimeout.Should().Be(TimeSpan.FromSeconds(4));
         options.Ingest.MaxRequestBodyBytes.Should().Be(5 * 2048 + 1024 * 1024);
     }
 
@@ -137,11 +140,12 @@ public class RagConfigurationTests : IDisposable
 
     [Theory]
     [InlineData("MaxFileSizeBytes", "0")]
-    [InlineData("MaxFilesPerJob", "-1")]
+    [InlineData("MaxFilesPerRequest", "-1")]
     [InlineData("MaxChunkCharacters", "0")]
     [InlineData("MaxAttempts", "0")]
     [InlineData("LeaseSeconds", "0")]
     [InlineData("PollIntervalSeconds", "0")]
+    [InlineData("CancelTimeoutSeconds", "0")]
     public void Bind_Throws_WhenAnIngestLimitIsNotPositive(string key, string value)
     {
         var act = () => RagConfiguration.Bind(ConfigWith(($"Rag:Ingest:{key}", value)));

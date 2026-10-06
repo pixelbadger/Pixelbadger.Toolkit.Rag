@@ -9,8 +9,7 @@ public class SearchService : ISearchService
 {
     public const int MaxQueryLength = 4096;
     public const int MaxResultsLimit = 100;
-    public const int MaxSourceIds = 100;
-    public const int MaxSourceIdLength = 256;
+    public const int MaxDocumentIds = 100;
 
     private readonly RagOptions _options;
     private readonly ILuceneRepository _lucene;
@@ -36,16 +35,16 @@ public class SearchService : ISearchService
     public async Task<IReadOnlyList<SearchResult>> SearchAsync(
         string queryText,
         int maxResults = 10,
-        IReadOnlyCollection<string>? sourceIds = null,
+        IReadOnlyCollection<Guid>? documentIds = null,
         CancellationToken cancellationToken = default)
     {
-        ValidateSearchRequest(queryText, maxResults, sourceIds);
+        ValidateSearchRequest(queryText, maxResults, documentIds);
 
         // Fetch more candidates from each side to improve fusion quality.
         var fetchCount = Math.Max(maxResults * 2, 20);
 
-        var keywordTask = _lucene.SearchAsync(_options.IndexPath, queryText, fetchCount, sourceIds, cancellationToken);
-        var vectorTask = VectorSearchAsync(queryText, fetchCount, sourceIds, cancellationToken);
+        var keywordTask = _lucene.SearchAsync(_options.IndexPath, queryText, fetchCount, documentIds, cancellationToken);
+        var vectorTask = VectorSearchAsync(queryText, fetchCount, documentIds, cancellationToken);
         await Task.WhenAll(keywordTask, vectorTask);
 
         var keywordIds = keywordTask.Result.Select(h => h.ChunkId).ToList();
@@ -76,7 +75,6 @@ public class SearchService : ISearchService
                 DocumentId = record.DocumentGlobalId,
                 SourcePath = record.SourcePath,
                 SourceFile = Path.GetFileName(record.SourcePath),
-                SourceId = record.SourceId,
                 Ordinal = record.Ordinal,
                 Modality = record.Modality,
                 LocatorStart = record.LocatorStart,
@@ -93,14 +91,14 @@ public class SearchService : ISearchService
     private async Task<IReadOnlyList<VectorHit>> VectorSearchAsync(
         string queryText,
         int fetchCount,
-        IReadOnlyCollection<string>? sourceIds,
+        IReadOnlyCollection<Guid>? documentIds,
         CancellationToken cancellationToken)
     {
         var embedding = await _embeddings.EmbedQueryAsync(queryText, cancellationToken);
-        return await _store.SearchAsync(embedding, fetchCount, sourceIds, cancellationToken);
+        return await _store.SearchAsync(embedding, fetchCount, documentIds, cancellationToken);
     }
 
-    private static void ValidateSearchRequest(string queryText, int maxResults, IReadOnlyCollection<string>? sourceIds)
+    private static void ValidateSearchRequest(string queryText, int maxResults, IReadOnlyCollection<Guid>? documentIds)
     {
         if (string.IsNullOrWhiteSpace(queryText))
         {
@@ -117,24 +115,14 @@ public class SearchService : ISearchService
             throw new ArgumentOutOfRangeException(nameof(maxResults), $"maxResults must be between 1 and {MaxResultsLimit}");
         }
 
-        if (sourceIds == null)
+        if (documentIds == null)
         {
             return;
         }
 
-        if (sourceIds.Count > MaxSourceIds)
+        if (documentIds.Count > MaxDocumentIds)
         {
-            throw new ArgumentOutOfRangeException(nameof(sourceIds), $"sourceIds cannot contain more than {MaxSourceIds} entries");
-        }
-
-        if (sourceIds.Any(string.IsNullOrWhiteSpace))
-        {
-            throw new ArgumentException("sourceIds cannot contain empty values", nameof(sourceIds));
-        }
-
-        if (sourceIds.Any(sourceId => sourceId.Length > MaxSourceIdLength))
-        {
-            throw new ArgumentOutOfRangeException(nameof(sourceIds), $"sourceIds entries cannot exceed {MaxSourceIdLength} characters");
+            throw new ArgumentOutOfRangeException(nameof(documentIds), $"documentIds cannot contain more than {MaxDocumentIds} entries");
         }
     }
 }

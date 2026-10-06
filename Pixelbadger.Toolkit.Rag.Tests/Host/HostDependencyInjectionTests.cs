@@ -49,6 +49,10 @@ public class HostDependencyInjectionTests
     [InlineData(typeof(IIngestQueue))]
     [InlineData(typeof(IngestRequestValidator))]
     [InlineData(typeof(IngestWorkerSignal))]
+    [InlineData(typeof(IngestJobRegistry))]
+    [InlineData(typeof(InFlightJobRecovery))]
+    [InlineData(typeof(DocumentService))]
+    [InlineData(typeof(IndexWriteGate))]
     [InlineData(typeof(RagOptions))]
     [InlineData(typeof(SqlStoreOptions))]
     [InlineData(typeof(EmbeddingModelOptions))]
@@ -77,6 +81,7 @@ public class HostDependencyInjectionTests
 
     [Theory]
     [InlineData(typeof(DatabaseMigrationHostedService))]
+    [InlineData(typeof(InFlightJobRecoveryHostedService))]
     [InlineData(typeof(IngestWorker))]
     public void HostedServicesConstructWithoutTouchingTheDatabase(Type hostedType)
     {
@@ -88,9 +93,9 @@ public class HostDependencyInjectionTests
     }
 
     [Fact]
-    public void HostedServices_AreRegisteredMigrationsBeforeWorker()
+    public void HostedServices_AreRegistered_MigrationsThenInFlightReset_ThenWorker()
     {
-        // Hosted services start in registration order: migrations must precede the worker's first poll.
+        // Hosted services start in registration order: migrations, then the in-flight job reset, then the worker's first poll.
         using var factory = new RagWebApplicationFactory { UseRealServices = true, KeepHostedServices = true };
         _ = factory.Services;
 
@@ -99,7 +104,7 @@ public class HostDependencyInjectionTests
             .Select(d => d.ImplementationType)
             .ToList();
 
-        hosted.Should().ContainInOrder(typeof(DatabaseMigrationHostedService), typeof(IngestWorker));
+        hosted.Should().ContainInOrder(typeof(DatabaseMigrationHostedService), typeof(InFlightJobRecoveryHostedService), typeof(IngestWorker));
     }
 
     [Fact]
@@ -123,6 +128,10 @@ public class HostDependencyInjectionTests
         sp.GetRequiredService<IEmbeddingService>().Should().BeSameAs(sp.GetRequiredService<IEmbeddingService>());
         sp.GetRequiredService<OnnxSessionProvider>().Should().BeSameAs(sp.GetRequiredService<OnnxSessionProvider>());
         sp.GetRequiredService<IngestWorkerSignal>().Should().BeSameAs(sp.GetRequiredService<IngestWorkerSignal>());
+        sp.GetRequiredService<IngestJobRegistry>().Should().BeSameAs(sp.GetRequiredService<IngestJobRegistry>());
+        sp.GetRequiredService<InFlightJobRecovery>().Should().BeSameAs(sp.GetRequiredService<InFlightJobRecovery>());
+        sp.GetRequiredService<IndexWriteGate>().Should().BeSameAs(sp.GetRequiredService<IndexWriteGate>());
+        sp.GetRequiredService<DocumentService>().Should().NotBeSameAs(sp.GetRequiredService<DocumentService>());
         sp.GetRequiredService<ISearchService>().Should().NotBeSameAs(sp.GetRequiredService<ISearchService>());
         sp.GetRequiredService<IIngestQueue>().Should().NotBeSameAs(sp.GetRequiredService<IIngestQueue>());
     }

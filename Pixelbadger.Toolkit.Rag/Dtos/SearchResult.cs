@@ -11,12 +11,11 @@ public class SearchResult
     /// <summary>Chunk global id (unique per chunk).</summary>
     public Guid ChunkId { get; set; }
 
-    /// <summary>Document global id (e.g. "doc_…").</summary>
-    public string DocumentId { get; set; } = string.Empty;
+    /// <summary>Document id (assigned by the server when the document was created).</summary>
+    public Guid DocumentId { get; set; }
 
     public string SourcePath { get; set; } = string.Empty;
     public string SourceFile { get; set; } = string.Empty;
-    public string SourceId { get; set; } = string.Empty;
 
     /// <summary>1-based chunk ordinal within the document.</summary>
     public int Ordinal { get; set; }

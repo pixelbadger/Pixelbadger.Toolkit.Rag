@@ -19,14 +19,15 @@ public class LuceneRepository : ILuceneRepository
 
     internal const string ChunkIdField = "chunk_id";
     internal const string DocumentIdField = "document_id";
-    internal const string SourceIdField = "source_id";
     internal const string ContentField = "content";
+
+    /// <summary>The indexed form of a document id ("D": 32 digits with hyphens, lower case).</summary>
+    internal static string FormatDocumentId(Guid documentId) => documentId.ToString("D");
 
     /// <inheritdoc />
     public Task ReplaceDocumentAsync(
         string indexPath,
-        string documentGlobalId,
-        string sourceId,
+        Guid documentId,
         IReadOnlyList<LuceneChunk> chunks,
         CancellationToken cancellationToken = default)
     {
@@ -46,15 +47,15 @@ public class LuceneRepository : ILuceneRepository
 
         using var writer = new IndexWriter(indexDirectory, config);
 
-        writer.DeleteDocuments(new Term(DocumentIdField, documentGlobalId));
+        var documentKey = FormatDocumentId(documentId);
+        writer.DeleteDocuments(new Term(DocumentIdField, documentKey));
 
         foreach (var chunk in chunks)
         {
             var doc = new Document
             {
                 new Int32Field(ChunkIdField, chunk.ChunkId, Field.Store.YES),
-                new StringField(DocumentIdField, documentGlobalId, Field.Store.YES),
-                new StringField(SourceIdField, sourceId, Field.Store.YES),
+                new StringField(DocumentIdField, documentKey, Field.Store.YES),
                 new TextField(ContentField, chunk.Text, Field.Store.NO)
             };
             writer.AddDocument(doc);
@@ -65,11 +66,31 @@ public class LuceneRepository : ILuceneRepository
     }
 
     /// <inheritdoc />
+    public Task DeleteDocumentAsync(string indexPath, Guid documentId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Nothing to delete (and no reason to create an index) when none exists yet, e.g. a media-only corpus.
+        if (!System.IO.Directory.Exists(indexPath))
+            return Task.CompletedTask;
+
+        using var indexDirectory = FSDirectory.Open(indexPath);
+        if (!DirectoryReader.IndexExists(indexDirectory))
+            return Task.CompletedTask;
+
+        using var analyzer = new StandardAnalyzer(LUCENE_VERSION);
+        using var writer = new IndexWriter(indexDirectory, new IndexWriterConfig(LUCENE_VERSION, analyzer) { Similarity = new BM25Similarity() });
+        writer.DeleteDocuments(new Term(DocumentIdField, FormatDocumentId(documentId)));
+        writer.Commit();
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
     public Task<IReadOnlyList<KeywordHit>> SearchAsync(
         string indexPath,
         string queryText,
         int maxResults,
-        IReadOnlyCollection<string>? sourceIds,
+        IReadOnlyCollection<Guid>? documentIds,
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -98,17 +119,17 @@ public class LuceneRepository : ILuceneRepository
         var contentQuery = ParseContentQuery(analyzer, queryText);
 
         Query finalQuery = contentQuery;
-        if (sourceIds is { Count: > 0 })
+        if (documentIds is { Count: > 0 })
         {
-            var sourceIdQuery = new BooleanQuery();
-            foreach (var sourceId in sourceIds)
+            var documentIdQuery = new BooleanQuery();
+            foreach (var documentId in documentIds)
             {
-                sourceIdQuery.Add(new TermQuery(new Term(SourceIdField, sourceId)), Occur.SHOULD);
+                documentIdQuery.Add(new TermQuery(new Term(DocumentIdField, FormatDocumentId(documentId))), Occur.SHOULD);
             }
 
             var boolQuery = new BooleanQuery();
             boolQuery.Add(contentQuery, Occur.MUST);
-            boolQuery.Add(sourceIdQuery, Occur.MUST);
+            boolQuery.Add(documentIdQuery, Occur.MUST);
             finalQuery = boolQuery;
         }
 

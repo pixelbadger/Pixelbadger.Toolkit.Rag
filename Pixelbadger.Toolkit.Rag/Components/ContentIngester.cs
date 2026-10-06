@@ -20,6 +20,7 @@ public class ContentIngester : IContentIngester
     private readonly RagOptions _options;
     private readonly IDocumentStore _store;
     private readonly ILuceneRepository _lucene;
+    private readonly IndexWriteGate _gate;
     private readonly IEmbeddingService _embeddings;
     private readonly ChunkerFactory _chunkerFactory;
     private readonly FileReaderFactory _fileReaderFactory;
@@ -31,6 +32,7 @@ public class ContentIngester : IContentIngester
         RagOptions options,
         IDocumentStore store,
         ILuceneRepository lucene,
+        IndexWriteGate gate,
         IEmbeddingService embeddings,
         ChunkerFactory chunkerFactory,
         FileReaderFactory fileReaderFactory,
@@ -41,6 +43,7 @@ public class ContentIngester : IContentIngester
         _options = options;
         _store = store;
         _lucene = lucene;
+        _gate = gate;
         _embeddings = embeddings;
         _chunkerFactory = chunkerFactory;
         _fileReaderFactory = fileReaderFactory;
@@ -76,22 +79,20 @@ public class ContentIngester : IContentIngester
 
     private async Task<IngestResult> IngestCoreAsync(IngestSource source, IngestOptions options, CancellationToken cancellationToken)
     {
-        var logicalPath = DocumentIds.NormalizeLogicalPath(source.LogicalPath);
+        var logicalPath = LogicalPath.Normalize(source.LogicalPath);
         var modality = GetModality(logicalPath)
             ?? throw new NotSupportedException($"Unsupported file type: {Path.GetExtension(logicalPath)}");
 
         var fileName = Path.GetFileName(logicalPath);
-        var documentGlobalId = DocumentIds.FromLogicalPath(logicalPath);
-        var sourceId = Path.GetFileNameWithoutExtension(logicalPath);
+        var documentId = source.DocumentId;
 
         var draft = new DocumentDraft(
-            documentGlobalId,
             logicalPath,
-            sourceId,
             fileName,
             modality,
             await ComputeContentHashAsync(source.LocalPath, cancellationToken));
 
+        // Embedding (the slow part) happens outside the gate; only the SQL + Lucene writes are serialised with deletes.
         var chunks = modality switch
         {
             Modality.Text => await BuildTextChunksAsync(source.LocalPath, fileName, logicalPath, options, cancellationToken),
@@ -99,36 +100,40 @@ public class ContentIngester : IContentIngester
             _ => await BuildAudioChunksAsync(source.LocalPath, cancellationToken)
         };
 
-        var records = await _store.ReplaceDocumentAsync(draft, chunks, cancellationToken);
-
-        try
+        using (await _gate.EnterAsync(cancellationToken))
         {
-            // Image/audio chunks are vector-only: BM25 indexes text chunks.
-            var luceneChunks = records
-                .Where(r => r.Modality == Modality.Text && !string.IsNullOrWhiteSpace(r.Text))
-                .Select(r => new LuceneChunk(r.ChunkId, r.Text!))
-                .ToList();
+            // Throws DocumentNotFoundException when the document was deleted meanwhile (nothing is written).
+            var records = await _store.ReplaceDocumentAsync(documentId, draft, chunks, cancellationToken);
 
-            if (luceneChunks.Count > 0 || modality == Modality.Text)
+            try
             {
-                // Always called for text so stale entries of a previous version are removed.
-                await _lucene.ReplaceDocumentAsync(_options.IndexPath, documentGlobalId, sourceId, luceneChunks, cancellationToken);
-            }
-        }
-        catch
-        {
-            await TrySetFailedAsync(documentGlobalId);
-            throw;
-        }
+                // Image/audio chunks are vector-only: BM25 indexes text chunks.
+                var luceneChunks = records
+                    .Where(r => r.Modality == Modality.Text && !string.IsNullOrWhiteSpace(r.Text))
+                    .Select(r => new LuceneChunk(r.ChunkId, r.Text!))
+                    .ToList();
 
-        return new IngestResult(logicalPath, documentGlobalId, modality, records.Count);
+                if (luceneChunks.Count > 0 || modality == Modality.Text)
+                {
+                    // Always called for text so stale entries of a previous version are removed.
+                    await _lucene.ReplaceDocumentAsync(_options.IndexPath, documentId, luceneChunks, cancellationToken);
+                }
+            }
+            catch
+            {
+                await TrySetFailedAsync(documentId);
+                throw;
+            }
+
+            return new IngestResult(logicalPath, documentId, modality, records.Count);
+        }
     }
 
-    private async Task TrySetFailedAsync(string documentGlobalId)
+    private async Task TrySetFailedAsync(Guid documentId)
     {
         try
         {
-            await _store.SetIndexStatusAsync(documentGlobalId, IndexStatus.Failed, CancellationToken.None);
+            await _store.SetIndexStatusAsync(documentId, IndexStatus.Failed, CancellationToken.None);
         }
         catch
         {

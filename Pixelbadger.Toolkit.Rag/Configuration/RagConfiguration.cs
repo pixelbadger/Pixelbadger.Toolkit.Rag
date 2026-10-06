@@ -85,11 +85,12 @@ public static class RagConfiguration
     private static void ValidateIngest(IngestSettings ingest)
     {
         RequirePositive(ingest.MaxFileSizeBytes, nameof(ingest.MaxFileSizeBytes));
-        RequirePositive(ingest.MaxFilesPerJob, nameof(ingest.MaxFilesPerJob));
+        RequirePositive(ingest.MaxFilesPerRequest, nameof(ingest.MaxFilesPerRequest));
         RequirePositive(ingest.MaxChunkCharacters, nameof(ingest.MaxChunkCharacters));
         RequirePositive(ingest.MaxAttempts, nameof(ingest.MaxAttempts));
         RequirePositive(ingest.LeaseSeconds, nameof(ingest.LeaseSeconds));
         RequirePositive(ingest.PollIntervalSeconds, nameof(ingest.PollIntervalSeconds));
+        RequirePositive(ingest.CancelTimeoutSeconds, nameof(ingest.CancelTimeoutSeconds));
     }
 
     private static void RequirePositive(long value, string name)

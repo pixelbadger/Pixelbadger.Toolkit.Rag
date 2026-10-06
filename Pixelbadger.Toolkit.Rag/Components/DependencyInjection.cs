@@ -38,6 +38,12 @@ public static class DependencyInjection
         services.AddTransient<IIngestQueue, SqlIngestQueue>();
         services.AddTransient<IngestRequestValidator>();
         services.AddSingleton<IngestWorkerSignal>();
+        services.AddSingleton<IngestJobRegistry>();
+        services.AddSingleton<InFlightJobRecovery>();
+        services.AddTransient<DocumentService>();
+
+        // Serialises SQL + Lucene writes (ingest) against document deletes; single-process assumption, see the class.
+        services.AddSingleton<IndexWriteGate>();
 
         // Chunking / reading
         services.AddTransient<ITextChunker, MarkdownTextChunker>();
@@ -57,11 +63,12 @@ public static class DependencyInjection
 
     /// <summary>
     /// Registers the background pieces of the web host. Order matters: hosted services start in registration
-    /// order, so migrations run before the worker starts polling.
+    /// order, so migrations run first, then the in-flight job reset, and only then does the worker start polling.
     /// </summary>
     public static IServiceCollection AddRagHostedServices(this IServiceCollection services)
     {
         services.AddHostedService<DatabaseMigrationHostedService>();
+        services.AddHostedService<InFlightJobRecoveryHostedService>();
         services.AddHostedService<IngestWorker>();
         return services;
     }

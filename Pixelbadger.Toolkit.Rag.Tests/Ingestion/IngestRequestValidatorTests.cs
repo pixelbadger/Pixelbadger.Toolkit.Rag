@@ -72,7 +72,7 @@ public class IngestRequestValidatorTests
     [Fact]
     public void FileCountLimit_IsInclusive_AndAtLeastOneFileIsRequired()
     {
-        var settings = new IngestSettings { MaxFilesPerJob = 2 };
+        var settings = new IngestSettings { MaxFilesPerRequest = 2 };
         var validator = Validator(settings);
         IngestFileCandidate F(string n) => new(n, 1);
 
@@ -82,11 +82,12 @@ public class IngestRequestValidatorTests
     }
 
     [Fact]
-    public void DuplicatePaths_AreRejected_AfterNormalisation()
+    public void RepeatedPaths_AreAllowed_BecauseTheyAreDifferentDocuments()
     {
         var result = Validator().Validate([new("docs/a.md", 1), new(@"docs\a.md", 1)], null);
 
-        result.Errors["files"].Should().ContainSingle(e => e.Contains("duplicate"));
+        result.IsValid.Should().BeTrue();
+        result.Paths.Should().Equal("docs/a.md", "docs/a.md");
     }
 
     [Fact]

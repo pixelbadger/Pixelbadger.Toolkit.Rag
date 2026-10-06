@@ -7,7 +7,7 @@ namespace Pixelbadger.Toolkit.Rag.Ingestion;
 public sealed record IngestFileCandidate(string FileName, long Length);
 
 /// <param name="Paths">Normalised logical paths, in upload order (valid only when <see cref="IsValid"/>).</param>
-/// <param name="MaxChunkCharacters">The effective chunk limit for the job.</param>
+/// <param name="MaxChunkCharacters">The effective chunk limit for the upload.</param>
 /// <param name="Errors">Field name to messages; empty when valid.</param>
 public sealed record IngestValidationResult(
     IReadOnlyList<string> Paths,
@@ -18,7 +18,8 @@ public sealed record IngestValidationResult(
 }
 
 /// <summary>
-/// Synchronous validation of an ingest upload. Any violation rejects the whole request, so nothing is enqueued.
+/// Synchronous validation of an upload. Any violation rejects the whole request, so nothing is created. Paths may
+/// repeat: a path is only metadata, and two uploads of it are two different documents.
 /// </summary>
 public sealed class IngestRequestValidator(IngestSettings settings, FileReaderFactory readers)
 {
@@ -35,11 +36,10 @@ public sealed class IngestRequestValidator(IngestSettings settings, FileReaderFa
 
         if (files.Count == 0)
             fileErrors.Add($"At least one file is required (multipart parts named '{FilesField}').");
-        else if (files.Count > settings.MaxFilesPerJob)
-            fileErrors.Add($"{files.Count} files were uploaded, exceeding the limit of {settings.MaxFilesPerJob} per job.");
+        else if (files.Count > settings.MaxFilesPerRequest)
+            fileErrors.Add($"{files.Count} files were uploaded, exceeding the limit of {settings.MaxFilesPerRequest} per request.");
 
         var paths = new List<string>(files.Count);
-        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var file in files)
         {
             if (!TryNormalizePath(file.FileName, out var path, out var pathError))
@@ -49,9 +49,6 @@ public sealed class IngestRequestValidator(IngestSettings settings, FileReaderFa
             }
 
             paths.Add(path);
-
-            if (!seen.Add(path))
-                fileErrors.Add($"'{path}': duplicate path in the same request.");
 
             if (file.Length > settings.MaxFileSizeBytes)
                 fileErrors.Add($"'{path}': {file.Length} bytes exceeds the limit of {settings.MaxFileSizeBytes} bytes.");
@@ -124,7 +121,7 @@ public sealed class IngestRequestValidator(IngestSettings settings, FileReaderFa
             }
         }
 
-        normalized = DocumentIds.NormalizeLogicalPath(path);
+        normalized = LogicalPath.Normalize(path);
         error = string.Empty;
         return true;
     }

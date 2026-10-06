@@ -4,7 +4,7 @@ using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Api;
 
-public sealed record QueryRequest(string? Query, int? MaxResults, string[]? SourceIds);
+public sealed record QueryRequest(string? Query, int? MaxResults, string[]? DocumentIds);
 
 public sealed record QueryResponse(IReadOnlyList<SearchResult> Results);
 
@@ -32,8 +32,8 @@ public static class QueryEndpoints
 
         try
         {
-            var sourceIds = request.SourceIds is { Length: > 0 } ? request.SourceIds : null;
-            var results = await search.SearchAsync(request.Query, request.MaxResults ?? DefaultMaxResults, sourceIds, cancellationToken);
+            var documentIds = DocumentIdFilter.Parse(request.DocumentIds);
+            var results = await search.SearchAsync(request.Query, request.MaxResults ?? DefaultMaxResults, documentIds, cancellationToken);
             return Results.Ok(new QueryResponse(results));
         }
         catch (ArgumentException ex)

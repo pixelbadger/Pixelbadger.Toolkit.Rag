@@ -29,7 +29,7 @@ builder.Services.Configure<FormOptions>(o =>
 {
     // MultipartBodyLengthLimit applies per multipart section, i.e. per uploaded file.
     o.MultipartBodyLengthLimit = rag.Ingest.MaxFileSizeBytes;
-    o.ValueCountLimit = rag.Ingest.MaxFilesPerJob + 16;
+    o.ValueCountLimit = rag.Ingest.MaxFilesPerRequest + 16;
 });
 
 // Search tool only; ingest is REST-only. Stateless: every request is independent, no session affinity.
@@ -43,7 +43,7 @@ app.UseExceptionHandler();
 app.UseStatusCodePages();
 
 app.MapHealthChecks("/health");
-app.MapIngestEndpoints();
+app.MapDocumentEndpoints();
 app.MapQueryEndpoints();
 app.MapMcp("/mcp");
 

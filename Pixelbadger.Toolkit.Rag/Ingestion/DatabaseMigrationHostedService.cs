@@ -7,7 +7,7 @@ namespace Pixelbadger.Toolkit.Rag.Ingestion;
 
 /// <summary>
 /// Applies EF Core migrations at startup (when <see cref="RagOptions.ApplyMigrationsOnStartup"/> is set).
-/// Registered before <see cref="IngestWorker"/>: hosted services start in order, so the worker never polls a
+/// Registered before <see cref="InFlightJobRecoveryHostedService"/> and <see cref="IngestWorker"/>: hosted services start in order, so the worker never polls a
 /// missing table. A failure here stops the host from starting.
 /// </summary>
 public sealed class DatabaseMigrationHostedService(

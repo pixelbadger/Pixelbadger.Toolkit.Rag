@@ -9,19 +9,24 @@ using Pixelbadger.Toolkit.Rag.Persistence;
 namespace Pixelbadger.Toolkit.Rag.Ingestion;
 
 /// <summary>
-/// Processes queued ingest jobs, one at a time and one file at a time (Lucene allows a single writer, and a
-/// single instance owns the index directory). Never lets an exception escape the loop: SQL errors are logged
-/// and retried with a growing delay, so a database outage cannot crash the host.
+/// Processes queued ingest jobs, one at a time (one job is one file for one document; Lucene allows a single
+/// writer, and a single instance owns the index directory). Never lets an exception escape the loop: SQL errors are
+/// logged and retried with a growing delay, so a database outage cannot crash the host.
 /// </summary>
 public sealed class IngestWorker(
     IServiceScopeFactory scopes,
     IngestSettings settings,
     IngestWorkerSignal signal,
+    IngestJobRegistry registry,
+    InFlightJobRecovery recovery,
     ILogger<IngestWorker> logger) : BackgroundService
 {
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(60);
 
     private readonly string _owner = $"{Environment.MachineName}:{Environment.ProcessId}:{Guid.NewGuid():N}";
+
+    // Set after a job indexed something; the vector index is (re)built once the queue is idle, not after every job.
+    private bool _vectorIndexStale;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -33,7 +38,10 @@ public sealed class IngestWorker(
                 var processed = await ProcessNextAsync(stoppingToken);
                 consecutiveFailures = 0;
                 if (!processed)
+                {
+                    await EnsureVectorIndexIfStaleAsync(stoppingToken);
                     await signal.WaitAsync(settings.PollInterval, stoppingToken);
+                }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -59,6 +67,9 @@ public sealed class IngestWorker(
     /// <summary>Claims and processes at most one job. Returns false when nothing was claimable.</summary>
     public async Task<bool> ProcessNextAsync(CancellationToken cancellationToken)
     {
+        // Jobs left Processing by a previous process must be requeued before anything is claimed (no-op once done).
+        await recovery.EnsureAsync(cancellationToken);
+
         await using var scope = scopes.CreateAsyncScope();
         var queue = scope.ServiceProvider.GetRequiredService<IIngestQueue>();
 
@@ -70,12 +81,26 @@ public sealed class IngestWorker(
         return true;
     }
 
+    /// <summary>Builds the vector index if jobs indexed something since the last time (the worker loop calls this when the queue is idle).</summary>
+    public async Task EnsureVectorIndexIfStaleAsync(CancellationToken cancellationToken)
+    {
+        if (!_vectorIndexStale)
+            return;
+
+        await using var scope = scopes.CreateAsyncScope();
+        // Idempotent; creates the vector index when enough rows exist.
+        await scope.ServiceProvider.GetRequiredService<IDocumentStore>().EnsureVectorIndexAsync(cancellationToken);
+        _vectorIndexStale = false;
+    }
+
     private async Task RunJobAsync(IServiceProvider services, IIngestQueue queue, IngestJobClaim claim, CancellationToken stoppingToken)
     {
-        logger.LogInformation("Processing ingest job {JobId} (attempt {Attempt})", claim.JobId, claim.Attempts);
+        logger.LogInformation("Processing ingest job {JobId} of document {DocumentId} (attempt {Attempt})", claim.JobId, claim.DocumentId, claim.Attempts);
 
         var jobDirectory = Path.Combine(Path.GetTempPath(), "pbrag-ingest", claim.JobId.ToString("N"));
-        using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        // Cancelled by shutdown or by a document delete (the registry tells the two apart).
+        using var active = registry.Begin(claim.JobId, claim.DocumentId, stoppingToken);
+        using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(active.Token);
         var leaseLost = false;
         var heartbeat = Task.Run(async () =>
         {
@@ -90,34 +115,37 @@ public sealed class IngestWorker(
             var ingester = services.GetRequiredService<IContentIngester>();
             var options = new IngestOptions { MaxFileSizeBytes = settings.MaxFileSizeBytes, MaxChunkCharacters = claim.MaxChunkCharacters };
 
-            // Files already terminal (from an earlier attempt) are not returned.
-            foreach (var file in await queue.GetPendingFilesAsync(claim.JobId, ct))
-            {
-                ct.ThrowIfCancellationRequested();
-                var outcome = await IngestFileAsync(queue, ingester, options, jobDirectory, file, ct);
-                await queue.CompleteFileAsync(file.FileId, outcome, ct);
-            }
-
-            // Once per job (idempotent; creates the vector index when enough rows exist).
-            await services.GetRequiredService<IDocumentStore>().EnsureVectorIndexAsync(ct);
-            await queue.CompleteJobAsync(claim.JobId, ct);
-            logger.LogInformation("Completed ingest job {JobId}", claim.JobId);
+            var outcome = await IngestAsync(queue, ingester, options, jobDirectory, claim, ct);
+            await queue.CompleteAsync(claim.JobId, outcome, ct);
+            _vectorIndexStale |= outcome.Status != IngestJobStatus.Failed;
+            logger.LogInformation("Completed ingest job {JobId}: {Status}", claim.JobId, outcome.Status);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            // Shutdown: leave the job Processing; its lease expires and it is retried (finished files stay finished).
+            // Shutdown: leave the job Processing; its lease expires (or the startup reset requeues it) and it is retried.
             logger.LogInformation("Ingest job {JobId} interrupted by shutdown", claim.JobId);
+        }
+        catch (Exception) when (active.CancelRequested)
+        {
+            // The document is being deleted: no requeue, no failure (whatever the cancelled call surfaced as).
+            // Deleting the document removes the job.
+            logger.LogInformation("Ingest job {JobId} cancelled because document {DocumentId} is being deleted", claim.JobId, claim.DocumentId);
         }
         catch (OperationCanceledException) when (leaseLost)
         {
             logger.LogWarning("Ingest job {JobId} lost its lease and was abandoned", claim.JobId);
+        }
+        catch (DocumentNotFoundException)
+        {
+            // Deleted between the claim and the write: nothing to record, the cascade removed the job.
+            logger.LogInformation("Ingest job {JobId} stopped: document {DocumentId} no longer exists", claim.JobId, claim.DocumentId);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Ingest job {JobId} failed on attempt {Attempt}", claim.JobId, claim.Attempts);
             try
             {
-                var status = await queue.FailJobAsync(claim.JobId, ex.Message, CancellationToken.None);
+                var status = await queue.FailAsync(claim.JobId, ex.Message, CancellationToken.None);
                 logger.LogInformation("Ingest job {JobId} is now {Status}", claim.JobId, status);
             }
             catch (Exception failEx)
@@ -130,43 +158,40 @@ public sealed class IngestWorker(
             jobCts.Cancel();
             await heartbeat;
             TryDeleteDirectory(jobDirectory);
+            // Last: a delete waiting on this job may proceed (and expects the temp files to be gone).
+            active.Dispose();
         }
     }
 
-    private async Task<IngestFileOutcome> IngestFileAsync(
+    private async Task<IngestJobOutcome> IngestAsync(
         IIngestQueue queue,
         IContentIngester ingester,
         IngestOptions options,
         string jobDirectory,
-        PendingIngestFile file,
+        IngestJobClaim claim,
         CancellationToken cancellationToken)
     {
         // The temp file keeps the original extension (modality and reader selection are extension based).
         Directory.CreateDirectory(jobDirectory);
-        var tempPath = Path.Combine(jobDirectory, $"file-{file.Ordinal}{Path.GetExtension(file.LogicalPath)}");
+        var tempPath = Path.Combine(jobDirectory, $"content{Path.GetExtension(claim.LogicalPath)}");
         try
         {
             await using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
                 // Errors reading the queue propagate: they fail the job (retried), not the file.
-                await queue.ReadFileContentAsync(file.FileId, stream, cancellationToken);
+                await queue.ReadContentAsync(claim.JobId, stream, cancellationToken);
             }
 
             try
             {
-                var result = await ingester.IngestAsync(new IngestSource(tempPath, file.LogicalPath), options, cancellationToken);
-                return new IngestFileOutcome(
-                    result.ChunkCount == 0 ? IngestFileStatus.Skipped : IngestFileStatus.Succeeded,
-                    result.DocumentId, result.Modality, result.ChunkCount);
+                var result = await ingester.IngestAsync(new IngestSource(tempPath, claim.LogicalPath, claim.DocumentId), options, cancellationToken);
+                return new IngestJobOutcome(result.ChunkCount == 0 ? IngestJobStatus.Skipped : IngestJobStatus.Succeeded, result.ChunkCount);
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is not (OperationCanceledException or DocumentNotFoundException))
             {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Ingesting {LogicalPath} failed", file.LogicalPath);
-                return new IngestFileOutcome(IngestFileStatus.Failed, Error: ex.Message);
+                // A problem with this file (unreadable, too large, ...): recorded, not retried.
+                logger.LogWarning(ex, "Ingesting {LogicalPath} failed", claim.LogicalPath);
+                return new IngestJobOutcome(IngestJobStatus.Failed, Error: ex.Message);
             }
         }
         finally
