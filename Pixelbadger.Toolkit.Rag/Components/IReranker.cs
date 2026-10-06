@@ -1,8 +1,10 @@
-using Pixelbadger.Toolkit.Rag.Dtos;
-
 namespace Pixelbadger.Toolkit.Rag.Components;
+
+/// <summary>A fused ranking entry keyed by SQL ChunkId.</summary>
+public sealed record FusedHit(int ChunkId, float Score, int? KeywordRank, int? VectorRank);
 
 public interface IReranker
 {
-    List<SearchResult> RerankResults(List<SearchResult> bm25Results, List<SearchResult> vectorResults, int maxResults);
+    /// <summary>Fuses two ranked chunk-id lists (best first) and returns the top <paramref name="maxResults"/>.</summary>
+    IReadOnlyList<FusedHit> Fuse(IReadOnlyList<int> keywordRanking, IReadOnlyList<int> vectorRanking, int maxResults);
 }

@@ -1,118 +1,124 @@
 using System.CommandLine;
+using Microsoft.Extensions.DependencyInjection;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Dtos;
+using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
-public class IngestCommand
+public static class IngestCommand
 {
-    private readonly IContentIngester _ingester;
-
-    public IngestCommand(IContentIngester ingester)
+    public static Command Create(CliContext context)
     {
-        _ingester = ingester;
-    }
+        var command = new Command("ingest", "Ingest text (.txt, .md), image and audio files into the SQL Server + Lucene hybrid index");
+        var common = new CommonOptions();
+        common.AddTo(command);
 
-    public Command Create()
-    {
-        var command = new Command("ingest", "Ingest content into a search index with intelligent chunking based on file type");
-
-        var indexPathOption = new Option<string>(
-            aliases: ["--index-path"],
-            description: "Path to the Lucene.NET index directory")
+        var contentPath = new Option<string>("--content-path")
         {
-            IsRequired = true
+            Description = "Path to a file or folder to ingest. Folders are scanned recursively for supported files.",
+            Required = true
+        };
+        var maxFileSize = new Option<long>("--max-file-size-bytes")
+        {
+            Description = "Maximum size in bytes for a single ingested file.",
+            DefaultValueFactory = _ => IngestOptions.DefaultMaxFileSizeBytes
+        };
+        var maxFiles = new Option<int>("--max-files")
+        {
+            Description = "Maximum number of supported files to ingest from a folder.",
+            DefaultValueFactory = _ => IngestOptions.DefaultMaxFiles
+        };
+        var maxChunkCharacters = new Option<int>("--max-chunk-characters")
+        {
+            Description = "Maximum size in characters for a single text chunk before indexing or embedding.",
+            DefaultValueFactory = _ => IngestOptions.DefaultMaxChunkCharacters
+        };
+        var allowSymlinks = new Option<bool>("--allow-symlinks")
+        {
+            Description = "Allow ingestion of symbolic links and reparse points. Disabled by default to avoid indexing off-root files."
         };
 
-        var contentPathOption = new Option<string>(
-            aliases: ["--content-path"],
-            description: "Path to the content file or folder to ingest. If a folder is provided, all supported files (.txt, .md) will be ingested.")
-        {
-            IsRequired = true
-        };
+        command.Options.Add(contentPath);
+        command.Options.Add(maxFileSize);
+        command.Options.Add(maxFiles);
+        command.Options.Add(maxChunkCharacters);
+        command.Options.Add(allowSymlinks);
 
-        var noVectorsOption = new Option<bool>(
-            aliases: ["--no-vectors"],
-            description: "Disable vector storage and avoid sending document content to OpenAI for embeddings.");
-
-        var maxFileSizeOption = new Option<long>(
-            aliases: ["--max-file-size-bytes"],
-            description: "Maximum size in bytes for a single ingested file.");
-        maxFileSizeOption.SetDefaultValue(IngestOptions.DefaultMaxFileSizeBytes);
-
-        var maxFilesOption = new Option<int>(
-            aliases: ["--max-files"],
-            description: "Maximum number of supported files to ingest from a folder.");
-        maxFilesOption.SetDefaultValue(IngestOptions.DefaultMaxFiles);
-
-        var maxChunkCharactersOption = new Option<int>(
-            aliases: ["--max-chunk-characters"],
-            description: "Maximum size in characters for a single chunk before indexing or embedding.");
-        maxChunkCharactersOption.SetDefaultValue(IngestOptions.DefaultMaxChunkCharacters);
-
-        var allowSymlinksOption = new Option<bool>(
-            aliases: ["--allow-symlinks"],
-            description: "Allow ingestion of symbolic links and reparse points. Disabled by default to avoid indexing off-root files.");
-
-        command.AddOption(indexPathOption);
-        command.AddOption(contentPathOption);
-        command.AddOption(noVectorsOption);
-        command.AddOption(maxFileSizeOption);
-        command.AddOption(maxFilesOption);
-        command.AddOption(maxChunkCharactersOption);
-        command.AddOption(allowSymlinksOption);
-
-        command.SetHandler(async (
-            string indexPath,
-            string contentPath,
-            bool noVectors,
-            long maxFileSizeBytes,
-            int maxFiles,
-            int maxChunkCharacters,
-            bool allowSymlinks) =>
+        command.SetAction(async (parseResult, cancellationToken) =>
         {
             try
             {
-                var options = new IngestOptions
+                var ragOptions = common.Resolve(parseResult, context, requireExistingIndex: false);
+                var path = parseResult.GetValue(contentPath)!;
+                var ingestOptions = new IngestOptions
                 {
-                    EnableVectorStorage = !noVectors,
-                    MaxFileSizeBytes = maxFileSizeBytes,
-                    MaxFiles = maxFiles,
-                    MaxChunkCharacters = maxChunkCharacters,
-                    AllowSymlinks = allowSymlinks
+                    MaxFileSizeBytes = parseResult.GetValue(maxFileSize),
+                    MaxFiles = parseResult.GetValue(maxFiles),
+                    MaxChunkCharacters = parseResult.GetValue(maxChunkCharacters),
+                    AllowSymlinks = parseResult.GetValue(allowSymlinks)
                 };
 
-                var storageMode = options.EnableVectorStorage
-                    ? "BM25 and vector storage. Document content will be sent to OpenAI for embeddings"
-                    : "BM25 storage only";
+                var isFolder = Directory.Exists(path);
+                if (!isFolder && !File.Exists(path))
+                    throw new FileNotFoundException($"Path not found: {path}");
 
-                // Check if contentPath is a directory or file
-                if (Directory.Exists(contentPath))
+                var provider = context.BuildServices(ragOptions);
+                try
                 {
-                    // Folder-based ingestion
-                    await _ingester.IngestFolderAsync(indexPath, contentPath, options);
+                    await provider.GetRequiredService<IDocumentStore>().MigrateAsync(cancellationToken);
+                    var ingester = provider.GetRequiredService<IContentIngester>();
 
-                    Console.WriteLine($"Successfully ingested all supported files from folder '{contentPath}' into index at '{indexPath}' using {storageMode}");
-                }
-                else if (File.Exists(contentPath))
-                {
-                    // Single file ingestion (backward compatibility)
-                    await _ingester.IngestContentAsync(indexPath, contentPath, options);
+                    IngestSummary summary;
+                    if (isFolder)
+                    {
+                        summary = await ingester.IngestFolderAsync(path, ingestOptions, cancellationToken);
+                    }
+                    else
+                    {
+                        var result = await ingester.IngestFileAsync(path, ingestOptions, cancellationToken);
+                        summary = new IngestSummary([result], [], 0);
+                    }
 
-                    Console.WriteLine($"Successfully ingested content from '{contentPath}' into index at '{indexPath}' using {storageMode}");
+                    WriteSummary(context.Out, summary, ragOptions.IndexPath);
+                    return summary.Failed.Count > 0 ? 1 : 0;
                 }
-                else
+                finally
                 {
-                    throw new FileNotFoundException($"Path not found: {contentPath}");
+                    await DisposeAsync(provider);
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await context.Err.WriteLineAsync("Cancelled.");
+                return 130;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
-                Environment.Exit(1);
+                await context.Err.WriteLineAsync($"Error: {ex.Message}");
+                return 1;
             }
-        }, indexPathOption, contentPathOption, noVectorsOption, maxFileSizeOption, maxFilesOption, maxChunkCharactersOption, allowSymlinksOption);
+        });
 
         return command;
+    }
+
+    internal static void WriteSummary(TextWriter output, IngestSummary summary, string indexPath)
+    {
+        foreach (var ok in summary.Succeeded)
+            output.WriteLine($"  OK    {ok.FilePath}  [{ok.Modality}, {ok.ChunkCount} chunk(s), {ok.DocumentId}]");
+        foreach (var failure in summary.Failed)
+            output.WriteLine($"  FAIL  {failure.FilePath}: {failure.Error}");
+
+        output.WriteLine(
+            $"Ingested {summary.Succeeded.Count} file(s), {summary.Failed.Count} failed, {summary.Skipped} skipped (Lucene index: '{indexPath}').");
+    }
+
+    internal static async ValueTask DisposeAsync(IServiceProvider provider)
+    {
+        if (provider is IAsyncDisposable asyncDisposable)
+            await asyncDisposable.DisposeAsync();
+        else if (provider is IDisposable disposable)
+            disposable.Dispose();
     }
 }

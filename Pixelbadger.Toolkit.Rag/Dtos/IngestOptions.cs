@@ -10,11 +10,6 @@ public class IngestOptions
     public const int DefaultMaxChunkCharacters = 20000;
 
     /// <summary>
-    /// Enable vector storage using sqlite-vec alongside Lucene BM25 indexing.
-    /// </summary>
-    public bool EnableVectorStorage { get; set; } = true;
-
-    /// <summary>
     /// Maximum size for a single file read during ingestion.
     /// </summary>
     public long MaxFileSizeBytes { get; set; } = DefaultMaxFileSizeBytes;

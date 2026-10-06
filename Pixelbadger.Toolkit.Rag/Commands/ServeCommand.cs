@@ -1,49 +1,34 @@
 using System.CommandLine;
-using Pixelbadger.Toolkit.Rag.Components;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
-public class ServeCommand
+public static class ServeCommand
 {
-    private readonly ISearchService _searchService;
-
-    public ServeCommand(ISearchService searchService)
+    public static Command Create(CliContext context)
     {
-        _searchService = searchService;
-    }
+        var command = new Command("serve", "Host a stdio MCP server exposing a hybrid 'Search' tool over the index");
+        var common = new CommonOptions();
+        common.AddTo(command);
 
-    public Command Create()
-    {
-        var command = new Command("serve", "Host an MCP server that performs BM25 queries against a Lucene.NET index");
-
-        var indexPathOption = new Option<string>(
-            aliases: ["--index-path"],
-            description: "Path to the Lucene.NET index directory")
-        {
-            IsRequired = true
-        };
-
-        command.AddOption(indexPathOption);
-
-        command.SetHandler(async (string indexPath) =>
+        command.SetAction(async (parseResult, cancellationToken) =>
         {
             try
             {
-                if (!Directory.Exists(indexPath))
-                {
-                    Console.WriteLine($"Error: Index directory '{indexPath}' not found.");
-                    Environment.Exit(1);
-                }
-
-                var server = new McpRagServer(indexPath, _searchService);
-                await server.RunAsync();
+                var ragOptions = common.Resolve(parseResult, context, requireExistingIndex: true);
+                await context.RunMcpServer(ragOptions, cancellationToken);
+                return 0;
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                return 0;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
-                Environment.Exit(1);
+                // stdout belongs to the MCP protocol: errors go to stderr only.
+                await context.Err.WriteLineAsync($"Error: {ex.Message}");
+                return 1;
             }
-        }, indexPathOption);
+        });
 
         return command;
     }

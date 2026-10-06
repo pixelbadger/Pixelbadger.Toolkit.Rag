@@ -1,112 +1,73 @@
 using System.CommandLine;
+using Microsoft.Extensions.DependencyInjection;
 using Pixelbadger.Toolkit.Rag.Components;
-using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Commands;
 
-public class QueryCommand
+public static class QueryCommand
 {
-    private readonly ISearchService _searchService;
-
-    public QueryCommand(ISearchService searchService)
+    public static Command Create(CliContext context)
     {
-        _searchService = searchService;
-    }
+        var command = new Command("query", "Run a hybrid (BM25 + vector, RRF) search against the index");
+        var common = new CommonOptions();
+        common.AddTo(command);
 
-    public Command Create()
-    {
-        var command = new Command("query", "Perform search against an index using BM25, vector, or hybrid modes");
-
-        var indexPathOption = new Option<string>(
-            aliases: ["--index-path"],
-            description: "Path to the Lucene.NET index directory")
+        var query = new Option<string>("--query")
         {
-            IsRequired = true
+            Description = "Search query text",
+            Required = true
+        };
+        var maxResults = new Option<int>("--max-results")
+        {
+            Description = "Maximum number of results to return (1-100)",
+            DefaultValueFactory = _ => 10
+        };
+        var sourceIds = new Option<string[]>("--source-ids", "--sourceIds")
+        {
+            Description = "Optional list of source IDs to constrain search results",
+            AllowMultipleArgumentsPerToken = true
         };
 
-        var queryOption = new Option<string>(
-            aliases: ["--query"],
-            description: "Search query text")
-        {
-            IsRequired = true
-        };
+        command.Options.Add(query);
+        command.Options.Add(maxResults);
+        command.Options.Add(sourceIds);
 
-        var maxResultsOption = new Option<int>(
-            aliases: ["--max-results"],
-            description: "Maximum number of results to return")
-        {
-            IsRequired = false
-        };
-        maxResultsOption.SetDefaultValue(10);
-
-        var sourceIdsOption = new Option<string[]>(
-            aliases: ["--sourceIds"],
-            description: "Optional list of source IDs to constrain search results")
-        {
-            IsRequired = false
-        };
-
-        var searchModeOption = new Option<string>(
-            aliases: ["--search-mode"],
-            description: "Search mode: 'bm25' (keyword), 'vector' (semantic), or 'hybrid' (combined)")
-        {
-            IsRequired = false
-        };
-        searchModeOption.SetDefaultValue("bm25");
-
-        command.AddOption(indexPathOption);
-        command.AddOption(queryOption);
-        command.AddOption(maxResultsOption);
-        command.AddOption(sourceIdsOption);
-        command.AddOption(searchModeOption);
-
-        command.SetHandler(async (string indexPath, string query, int maxResults, string[] sourceIds, string searchModeStr) =>
+        command.SetAction(async (parseResult, cancellationToken) =>
         {
             try
             {
-                var searchMode = ParseSearchMode(searchModeStr);
-                var results = await _searchService.SearchAsync(indexPath, query, searchMode, maxResults, sourceIds);
-
-                if (results.Count == 0)
+                var ragOptions = common.Resolve(parseResult, context, requireExistingIndex: true);
+                var provider = context.BuildServices(ragOptions);
+                try
                 {
-                    Console.WriteLine("No results found.");
-                    return;
+                    var search = provider.GetRequiredService<ISearchService>();
+                    var ids = parseResult.GetValue(sourceIds);
+                    var results = await search.SearchAsync(
+                        parseResult.GetValue(query)!,
+                        parseResult.GetValue(maxResults),
+                        ids is { Length: > 0 } ? ids : null,
+                        cancellationToken);
+
+                    await context.Out.WriteLineAsync(SearchResultFormatter.FormatForCli(results));
+                    return 0;
                 }
-
-                Console.WriteLine($"Found {results.Count} result(s) using {searchModeStr} search:");
-                Console.WriteLine();
-
-                for (int i = 0; i < results.Count; i++)
+                finally
                 {
-                    var result = results[i];
-                    Console.WriteLine($"Result {i + 1} (Score: {result.Score:F4})");
-                    Console.WriteLine($"Source: {result.SourceFile} (Paragraph {result.ParagraphNumber})");
-                    Console.WriteLine($"Content: {result.Content}");
-
-                    if (i < results.Count - 1)
-                    {
-                        Console.WriteLine(new string('-', 60));
-                    }
+                    await IngestCommand.DisposeAsync(provider);
                 }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                await context.Err.WriteLineAsync("Cancelled.");
+                return 130;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error: {ex.Message}");
-                Environment.Exit(1);
+                await context.Err.WriteLineAsync($"Error: {ex.Message}");
+                return 1;
             }
-        }, indexPathOption, queryOption, maxResultsOption, sourceIdsOption, searchModeOption);
+        });
 
         return command;
-    }
-
-    private static SearchMode ParseSearchMode(string mode)
-    {
-        return mode.ToLowerInvariant() switch
-        {
-            "bm25" => SearchMode.Bm25,
-            "vector" => SearchMode.Vector,
-            "hybrid" => SearchMode.Hybrid,
-            _ => throw new ArgumentException($"Unknown search mode: {mode}. Valid modes are: bm25, vector, hybrid")
-        };
     }
 }

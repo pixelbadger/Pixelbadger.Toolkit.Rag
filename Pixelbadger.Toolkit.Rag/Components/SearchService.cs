@@ -1,7 +1,10 @@
 using Pixelbadger.Toolkit.Rag.Dtos;
+using Pixelbadger.Toolkit.Rag.Embeddings;
+using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
+/// <summary>Hybrid search: Lucene BM25 + SQL vector, fused with RRF, hydrated from SQL.</summary>
 public class SearchService : ISearchService
 {
     public const int MaxQueryLength = 4096;
@@ -9,34 +12,95 @@ public class SearchService : ISearchService
     public const int MaxSourceIds = 100;
     public const int MaxSourceIdLength = 256;
 
-    private readonly ILuceneRepository _luceneRepo;
-    private readonly IVectorRepository _vectorRepo;
+    private readonly RagOptions _options;
+    private readonly ILuceneRepository _lucene;
+    private readonly IDocumentStore _store;
+    private readonly IEmbeddingService _embeddings;
     private readonly IReranker _reranker;
 
     public SearchService(
-        ILuceneRepository luceneRepo,
-        IVectorRepository vectorRepo,
+        RagOptions options,
+        ILuceneRepository lucene,
+        IDocumentStore store,
+        IEmbeddingService embeddings,
         IReranker reranker)
     {
-        _luceneRepo = luceneRepo;
-        _vectorRepo = vectorRepo;
+        _options = options;
+        _lucene = lucene;
+        _store = store;
+        _embeddings = embeddings;
         _reranker = reranker;
     }
 
-    public async Task<List<SearchResult>> SearchAsync(string indexPath, string queryText, SearchMode mode, int maxResults = 10, string[]? sourceIds = null)
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<SearchResult>> SearchAsync(
+        string queryText,
+        int maxResults = 10,
+        IReadOnlyCollection<string>? sourceIds = null,
+        CancellationToken cancellationToken = default)
     {
         ValidateSearchRequest(queryText, maxResults, sourceIds);
 
-        return mode switch
+        // Fetch more candidates from each side to improve fusion quality.
+        var fetchCount = Math.Max(maxResults * 2, 20);
+
+        var keywordTask = _lucene.SearchAsync(_options.IndexPath, queryText, fetchCount, sourceIds, cancellationToken);
+        var vectorTask = VectorSearchAsync(queryText, fetchCount, sourceIds, cancellationToken);
+        await Task.WhenAll(keywordTask, vectorTask);
+
+        var keywordIds = keywordTask.Result.Select(h => h.ChunkId).ToList();
+        var vectorIds = vectorTask.Result.Select(h => h.ChunkId).ToList();
+
+        var fused = _reranker.Fuse(keywordIds, vectorIds, maxResults);
+        if (fused.Count == 0)
         {
-            SearchMode.Bm25 => await _luceneRepo.QueryLuceneAsync(indexPath, queryText, maxResults, sourceIds),
-            SearchMode.Vector => await VectorQueryAsync(indexPath, queryText, maxResults, sourceIds),
-            SearchMode.Hybrid => await HybridQueryAsync(indexPath, queryText, maxResults, sourceIds),
-            _ => throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown search mode")
-        };
+            return Array.Empty<SearchResult>();
+        }
+
+        var records = await _store.GetChunksAsync(fused.Select(f => f.ChunkId).ToList(), cancellationToken);
+        var byId = records.ToDictionary(r => r.ChunkId);
+
+        var results = new List<SearchResult>(fused.Count);
+        foreach (var hit in fused)
+        {
+            // A chunk can be missing from SQL if the Lucene index is stale; skip it.
+            if (!byId.TryGetValue(hit.ChunkId, out var record))
+            {
+                continue;
+            }
+
+            results.Add(new SearchResult
+            {
+                Score = hit.Score,
+                ChunkId = record.ChunkGlobalId,
+                DocumentId = record.DocumentGlobalId,
+                SourcePath = record.SourcePath,
+                SourceFile = Path.GetFileName(record.SourcePath),
+                SourceId = record.SourceId,
+                Ordinal = record.Ordinal,
+                Modality = record.Modality,
+                LocatorStart = record.LocatorStart,
+                LocatorEnd = record.LocatorEnd,
+                Content = record.Text,
+                KeywordRank = hit.KeywordRank,
+                VectorRank = hit.VectorRank
+            });
+        }
+
+        return results;
     }
 
-    private static void ValidateSearchRequest(string queryText, int maxResults, string[]? sourceIds)
+    private async Task<IReadOnlyList<VectorHit>> VectorSearchAsync(
+        string queryText,
+        int fetchCount,
+        IReadOnlyCollection<string>? sourceIds,
+        CancellationToken cancellationToken)
+    {
+        var embedding = await _embeddings.EmbedQueryAsync(queryText, cancellationToken);
+        return await _store.SearchAsync(embedding, fetchCount, sourceIds, cancellationToken);
+    }
+
+    private static void ValidateSearchRequest(string queryText, int maxResults, IReadOnlyCollection<string>? sourceIds)
     {
         if (string.IsNullOrWhiteSpace(queryText))
         {
@@ -58,12 +122,12 @@ public class SearchService : ISearchService
             return;
         }
 
-        if (sourceIds.Length > MaxSourceIds)
+        if (sourceIds.Count > MaxSourceIds)
         {
             throw new ArgumentOutOfRangeException(nameof(sourceIds), $"sourceIds cannot contain more than {MaxSourceIds} entries");
         }
 
-        if (sourceIds.Any(sourceId => string.IsNullOrWhiteSpace(sourceId)))
+        if (sourceIds.Any(string.IsNullOrWhiteSpace))
         {
             throw new ArgumentException("sourceIds cannot contain empty values", nameof(sourceIds));
         }
@@ -72,28 +136,5 @@ public class SearchService : ISearchService
         {
             throw new ArgumentOutOfRangeException(nameof(sourceIds), $"sourceIds entries cannot exceed {MaxSourceIdLength} characters");
         }
-    }
-
-    private async Task<List<SearchResult>> VectorQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
-    {
-        return await _vectorRepo.QueryVectorsAsync(indexPath, queryText, maxResults, sourceIds);
-    }
-
-    private async Task<List<SearchResult>> HybridQueryAsync(string indexPath, string queryText, int maxResults = 10, string[]? sourceIds = null)
-    {
-        // Fetch more results from each search to improve fusion quality
-        var fetchCount = Math.Max(maxResults * 2, 20);
-
-        // Run both searches in parallel
-        var bm25Task = _luceneRepo.QueryLuceneAsync(indexPath, queryText, fetchCount, sourceIds);
-        var vectorTask = VectorQueryAsync(indexPath, queryText, fetchCount, sourceIds);
-
-        await Task.WhenAll(bm25Task, vectorTask);
-
-        var bm25Results = bm25Task.Result;
-        var vectorResults = vectorTask.Result;
-
-        // Apply Reranker
-        return _reranker.RerankResults(bm25Results, vectorResults, maxResults);
     }
 }

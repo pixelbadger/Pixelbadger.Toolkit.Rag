@@ -4,7 +4,9 @@ namespace Pixelbadger.Toolkit.Rag.Components;
 
 public interface IContentIngester
 {
-    Task IngestContentAsync(string indexPath, string contentPath);
-    Task IngestContentAsync(string indexPath, string contentPath, IngestOptions? options);
-    Task IngestFolderAsync(string indexPath, string folderPath, IngestOptions? options = null);
+    /// <summary>Ingests one text, image or audio file (routed by <see cref="Domain.MediaTypes"/>).</summary>
+    Task<IngestResult> IngestFileAsync(string filePath, IngestOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Recursively ingests all supported files under a folder; per-file failures are reported, not thrown.</summary>
+    Task<IngestSummary> IngestFolderAsync(string folderPath, IngestOptions? options = null, CancellationToken cancellationToken = default);
 }

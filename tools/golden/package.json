@@ -1,0 +1,17 @@
+{
+  "name": "pbrag-golden",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Generates golden fixtures for the EmbeddingGemma 2 C# implementation using transformers.js as the reference processor/model.",
+  "type": "module",
+  "scripts": {
+    "generate": "node generate.mjs",
+    "check-inputs": "node generate.mjs --inputs-only"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.7.0"
+  }
+}

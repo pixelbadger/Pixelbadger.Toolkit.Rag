@@ -1,58 +1,60 @@
-using Pixelbadger.Toolkit.Rag.Dtos;
-
 namespace Pixelbadger.Toolkit.Rag.Components;
 
+/// <summary>Reciprocal Rank Fusion over chunk ids (k = 60).</summary>
 public class RrfReranker : IReranker
 {
-    public List<SearchResult> RerankResults(List<SearchResult> bm25Results, List<SearchResult> vectorResults, int maxResults)
+    /// <summary>Standard RRF constant.</summary>
+    public const int K = 60;
+
+    /// <inheritdoc />
+    public IReadOnlyList<FusedHit> Fuse(IReadOnlyList<int> keywordRanking, IReadOnlyList<int> vectorRanking, int maxResults)
     {
-        // Apply Reciprocal Rank Fusion (RRF)
-        // RRF score = sum(1 / (k + rank)) for each result list
-        const int k = 60; // Standard RRF constant
-
-        var fusedScores = new Dictionary<string, (float Score, SearchResult Result)>();
-
-        // Process BM25 results
-        for (int i = 0; i < bm25Results.Count; i++)
+        if (maxResults < 1)
         {
-            var result = bm25Results[i];
-            var rrfScore = 1.0f / (k + i + 1);
-
-            if (fusedScores.TryGetValue(result.DocumentId, out var existing))
-            {
-                fusedScores[result.DocumentId] = (existing.Score + rrfScore, existing.Result);
-            }
-            else
-            {
-                fusedScores[result.DocumentId] = (rrfScore, result);
-            }
+            return Array.Empty<FusedHit>();
         }
 
-        // Process vector results
-        for (int i = 0; i < vectorResults.Count; i++)
-        {
-            var result = vectorResults[i];
-            var rrfScore = 1.0f / (k + i + 1);
+        // Insertion order (keyword list first) gives a deterministic tie-break.
+        var scores = new Dictionary<int, (float Score, int? KeywordRank, int? VectorRank)>();
+        var order = new List<int>();
 
-            if (fusedScores.TryGetValue(result.DocumentId, out var existing))
-            {
-                fusedScores[result.DocumentId] = (existing.Score + rrfScore, existing.Result);
-            }
-            else
-            {
-                fusedScores[result.DocumentId] = (rrfScore, result);
-            }
-        }
+        Accumulate(keywordRanking, isKeyword: true);
+        Accumulate(vectorRanking, isKeyword: false);
 
-        // Sort by fused score and return top results
-        return fusedScores.Values
-            .OrderByDescending(x => x.Score)
+        return order
+            .Select(id => new FusedHit(id, scores[id].Score, scores[id].KeywordRank, scores[id].VectorRank))
+            .OrderByDescending(h => h.Score)
             .Take(maxResults)
-            .Select(x =>
-            {
-                x.Result.Score = x.Score;
-                return x.Result;
-            })
             .ToList();
+
+        void Accumulate(IReadOnlyList<int> ranking, bool isKeyword)
+        {
+            for (int i = 0; i < ranking.Count; i++)
+            {
+                var id = ranking[i];
+                var rank = i + 1;
+                var rrf = 1.0f / (K + rank);
+
+                if (!scores.TryGetValue(id, out var entry))
+                {
+                    order.Add(id);
+                    entry = (0f, null, null);
+                }
+
+                // A duplicate id within one list keeps its best (first) rank and is not double counted.
+                if (isKeyword)
+                {
+                    if (entry.KeywordRank.HasValue) continue;
+                    entry = (entry.Score + rrf, rank, entry.VectorRank);
+                }
+                else
+                {
+                    if (entry.VectorRank.HasValue) continue;
+                    entry = (entry.Score + rrf, entry.KeywordRank, rank);
+                }
+
+                scores[id] = entry;
+            }
+        }
     }
 }

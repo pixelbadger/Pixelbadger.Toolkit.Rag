@@ -1,63 +1,70 @@
+using System.Security.Cryptography;
+using System.Text;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
+using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Dtos;
+using Pixelbadger.Toolkit.Rag.Embeddings;
+using Pixelbadger.Toolkit.Rag.Embeddings.Audio;
+using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
+using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
+/// <summary>
+/// Ingestion pipeline. Text: reader, chunker, embed, SQL, Lucene. Image: one chunk. Audio: one chunk
+/// per window. Only text chunks go into the Lucene BM25 index.
+/// </summary>
 public class ContentIngester : IContentIngester
 {
-    private readonly ILuceneRepository _luceneRepo;
-    private readonly IVectorRepository _vectorRepo;
+    private readonly RagOptions _options;
+    private readonly IDocumentStore _store;
+    private readonly ILuceneRepository _lucene;
+    private readonly IEmbeddingService _embeddings;
     private readonly ChunkerFactory _chunkerFactory;
     private readonly FileReaderFactory _fileReaderFactory;
+    private readonly IImagePreprocessor _imagePreprocessor;
+    private readonly IAudioPreprocessor _audioPreprocessor;
 
     public ContentIngester(
-        ILuceneRepository luceneRepo,
-        IVectorRepository vectorRepo,
+        RagOptions options,
+        IDocumentStore store,
+        ILuceneRepository lucene,
+        IEmbeddingService embeddings,
         ChunkerFactory chunkerFactory,
-        FileReaderFactory fileReaderFactory)
+        FileReaderFactory fileReaderFactory,
+        IImagePreprocessor imagePreprocessor,
+        IAudioPreprocessor audioPreprocessor)
     {
-        _luceneRepo = luceneRepo;
-        _vectorRepo = vectorRepo;
+        _options = options;
+        _store = store;
+        _lucene = lucene;
+        _embeddings = embeddings;
         _chunkerFactory = chunkerFactory;
         _fileReaderFactory = fileReaderFactory;
+        _imagePreprocessor = imagePreprocessor;
+        _audioPreprocessor = audioPreprocessor;
     }
 
-    public Task IngestContentAsync(string indexPath, string contentPath)
-    {
-        return IngestContentAsync(indexPath, contentPath, null);
-    }
-
-    public async Task IngestContentAsync(string indexPath, string contentPath, IngestOptions? options)
+    /// <inheritdoc />
+    public async Task<IngestResult> IngestFileAsync(string filePath, IngestOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new IngestOptions();
 
-        if (!File.Exists(contentPath))
+        if (!File.Exists(filePath))
         {
-            throw new FileNotFoundException($"Content file not found: {contentPath}");
+            throw new FileNotFoundException($"Content file not found: {filePath}");
         }
 
         ValidateIngestOptions(options);
-        ValidateFileForIngestion(contentPath, options);
+        ValidateFileForIngestion(filePath, options);
 
-        var fileReader = _fileReaderFactory.GetReader(contentPath);
-        var content = await fileReader.ReadTextAsync(contentPath);
-        var chunks = await GetChunksForFileAsync(contentPath, content);
-
-        // Filter out empty chunks
-        var nonEmptyChunks = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
-        ValidateChunksForIngestion(contentPath, nonEmptyChunks, options);
-
-        // Lucene BM25 indexing
-        await _luceneRepo.IndexWithLuceneAsync(indexPath, contentPath, nonEmptyChunks);
-
-        // Vector storage
-        if (options.EnableVectorStorage)
-        {
-            await _vectorRepo.StoreVectorsAsync(indexPath, contentPath, nonEmptyChunks);
-        }
+        var result = await IngestCoreAsync(filePath, options, cancellationToken);
+        await _store.EnsureVectorIndexAsync(cancellationToken);
+        return result;
     }
 
-    public async Task IngestFolderAsync(string indexPath, string folderPath, IngestOptions? options = null)
+    /// <inheritdoc />
+    public async Task<IngestSummary> IngestFolderAsync(string folderPath, IngestOptions? options = null, CancellationToken cancellationToken = default)
     {
         options ??= new IngestOptions();
 
@@ -76,77 +83,202 @@ public class ContentIngester : IContentIngester
         var rootPath = NormalizeRootPath(Path.GetFullPath(folderPath));
 
         // Discover files without following symlinked directories by default.
-        var allFiles = EnumerateFilesSafely(rootPath, options).ToList();
-
-        // Filter to only supported file types
-        var supportedFiles = allFiles.Where(file => _fileReaderFactory.CanRead(file)).ToList();
+        var supportedFiles = EnumerateFilesSafely(rootPath, options).Where(IsSupported).ToList();
         if (supportedFiles.Count > options.MaxFiles)
         {
             throw new InvalidOperationException($"Folder contains {supportedFiles.Count} supported files, exceeding the limit of {options.MaxFiles}");
         }
 
+        var succeeded = new List<IngestResult>();
+        var failed = new List<IngestFailure>();
+        var skipped = 0;
+
         if (supportedFiles.Count == 0)
         {
             Console.WriteLine($"No supported files found in {folderPath}");
-            Console.WriteLine($"Supported extensions: {string.Join(", ", _fileReaderFactory.SupportedExtensions)}");
-            return;
+            Console.WriteLine($"Supported extensions: {string.Join(", ", SupportedExtensions)}");
+            return new IngestSummary(succeeded, failed, skipped);
         }
 
         Console.WriteLine($"Found {supportedFiles.Count} supported files to ingest");
 
-        // Process each file
         foreach (var filePath in supportedFiles)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            var fileName = Path.GetFileName(filePath);
+
             try
             {
-                Console.WriteLine($"Ingesting: {Path.GetFileName(filePath)}");
+                Console.WriteLine($"Ingesting: {fileName}");
                 ValidateFileWithinRoot(filePath, rootPath);
                 ValidateFileForIngestion(filePath, options);
 
-                // Get the appropriate reader for this file
-                var reader = _fileReaderFactory.GetReader(filePath);
-
-                // Read the content using the file reader
-                var content = await reader.ReadTextAsync(filePath);
-
-                // Chunk the content
-                var chunks = await GetChunksForFileAsync(filePath, content);
-
-                // Filter out empty chunks
-                var nonEmptyChunks = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
-                ValidateChunksForIngestion(filePath, nonEmptyChunks, options);
-
-                if (nonEmptyChunks.Count == 0)
+                var result = await IngestCoreAsync(filePath, options, cancellationToken);
+                if (result.ChunkCount == 0)
                 {
-                    Console.WriteLine($"  Skipped (no content): {Path.GetFileName(filePath)}");
+                    Console.WriteLine($"  Skipped (no content): {fileName}");
+                    skipped++;
                     continue;
                 }
 
-                // Lucene BM25 indexing
-                await _luceneRepo.IndexWithLuceneAsync(indexPath, filePath, nonEmptyChunks);
-
-                // Vector storage
-                if (options.EnableVectorStorage)
-                {
-                    await _vectorRepo.StoreVectorsAsync(indexPath, filePath, nonEmptyChunks);
-                }
-
-                Console.WriteLine($"  Indexed {nonEmptyChunks.Count} chunks from {Path.GetFileName(filePath)}");
+                Console.WriteLine($"  Indexed {result.ChunkCount} chunks from {fileName}");
+                succeeded.Add(result);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"  Error ingesting {Path.GetFileName(filePath)}: {ex.Message}");
+                Console.WriteLine($"  Error ingesting {fileName}: {ex.Message}");
+                failed.Add(new IngestFailure(filePath, ex.Message));
                 // Continue processing other files
             }
         }
 
+        // Once per batch (idempotent; creates the vector index once enough rows exist).
+        await _store.EnsureVectorIndexAsync(cancellationToken);
+
         Console.WriteLine($"Completed ingestion of {supportedFiles.Count} files");
+        return new IngestSummary(succeeded, failed, skipped);
     }
 
-    private async Task<List<IChunk>> GetChunksForFileAsync(string filePath, string content)
+    private IEnumerable<string> SupportedExtensions =>
+        _fileReaderFactory.SupportedExtensions
+            .Where(e => MediaTypes.TextExtensions.Contains(e))
+            .Concat(MediaTypes.ImageExtensions)
+            .Concat(MediaTypes.AudioExtensions)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase);
+
+    private bool IsSupported(string filePath) => GetModality(filePath) != null;
+
+    private Modality? GetModality(string filePath)
     {
-        var chunker = _chunkerFactory.GetChunker(filePath);
-        return await chunker.ChunkTextAsync(content);
+        var modality = MediaTypes.GetModality(filePath);
+        return modality == Modality.Text && !_fileReaderFactory.CanRead(filePath) ? null : modality;
+    }
+
+    private async Task<IngestResult> IngestCoreAsync(string filePath, IngestOptions options, CancellationToken cancellationToken)
+    {
+        var modality = GetModality(filePath)
+            ?? throw new NotSupportedException($"Unsupported file type: {Path.GetExtension(filePath)}");
+
+        var fullPath = Path.GetFullPath(filePath);
+        var fileName = Path.GetFileName(fullPath);
+        var documentGlobalId = DocumentIds.FromSourcePath(fullPath);
+        var sourceId = Path.GetFileNameWithoutExtension(fullPath);
+
+        var draft = new DocumentDraft(
+            documentGlobalId,
+            fullPath,
+            sourceId,
+            fileName,
+            modality,
+            await ComputeContentHashAsync(fullPath, cancellationToken));
+
+        var chunks = modality switch
+        {
+            Modality.Text => await BuildTextChunksAsync(fullPath, fileName, options, cancellationToken),
+            Modality.Image => await BuildImageChunksAsync(fullPath, cancellationToken),
+            _ => await BuildAudioChunksAsync(fullPath, cancellationToken)
+        };
+
+        var records = await _store.ReplaceDocumentAsync(draft, chunks, cancellationToken);
+
+        try
+        {
+            // Image/audio chunks are vector-only: BM25 indexes text chunks.
+            var luceneChunks = records
+                .Where(r => r.Modality == Modality.Text && !string.IsNullOrWhiteSpace(r.Text))
+                .Select(r => new LuceneChunk(r.ChunkId, r.Text!))
+                .ToList();
+
+            if (luceneChunks.Count > 0 || modality == Modality.Text)
+            {
+                // Always called for text so stale entries of a previous version are removed.
+                await _lucene.ReplaceDocumentAsync(_options.IndexPath, documentGlobalId, sourceId, luceneChunks, cancellationToken);
+            }
+        }
+        catch
+        {
+            await TrySetFailedAsync(documentGlobalId);
+            throw;
+        }
+
+        return new IngestResult(fullPath, documentGlobalId, modality, records.Count);
+    }
+
+    private async Task TrySetFailedAsync(string documentGlobalId)
+    {
+        try
+        {
+            await _store.SetIndexStatusAsync(documentGlobalId, IndexStatus.Failed, CancellationToken.None);
+        }
+        catch
+        {
+            // Best effort: the original Lucene failure is the error worth reporting.
+        }
+    }
+
+    private async Task<List<ChunkDraft>> BuildTextChunksAsync(string filePath, string title, IngestOptions options, CancellationToken cancellationToken)
+    {
+        var reader = _fileReaderFactory.GetReader(filePath);
+        var content = await reader.ReadTextAsync(filePath);
+        var chunks = await _chunkerFactory.GetChunker(filePath).ChunkTextAsync(content);
+
+        // Filter out empty chunks
+        var nonEmpty = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
+        ValidateChunksForIngestion(filePath, nonEmpty, options);
+
+        if (nonEmpty.Count == 0)
+        {
+            return new List<ChunkDraft>();
+        }
+
+        var texts = nonEmpty.Select(c => c.Content).ToList();
+        var locators = TextChunkLocator.Locate(content, texts);
+        var embeddings = await _embeddings.EmbedDocumentTextAsync(title, texts, cancellationToken);
+        if (embeddings.Count != texts.Count)
+        {
+            throw new InvalidOperationException($"Embedding service returned {embeddings.Count} vectors for {texts.Count} chunks of '{filePath}'");
+        }
+
+        var drafts = new List<ChunkDraft>(texts.Count);
+        for (int i = 0; i < texts.Count; i++)
+        {
+            drafts.Add(new ChunkDraft(i + 1, Modality.Text, locators[i]?.Start, locators[i]?.End, texts[i], embeddings[i]));
+        }
+
+        return drafts;
+    }
+
+    private async Task<List<ChunkDraft>> BuildImageChunksAsync(string filePath, CancellationToken cancellationToken)
+    {
+        var image = await _imagePreprocessor.PreprocessAsync(filePath, cancellationToken);
+        var embedding = await _embeddings.EmbedImageAsync(image, cancellationToken);
+        return new List<ChunkDraft> { new(1, Modality.Image, null, null, null, embedding) };
+    }
+
+    private async Task<List<ChunkDraft>> BuildAudioChunksAsync(string filePath, CancellationToken cancellationToken)
+    {
+        var windows = await _audioPreprocessor.PreprocessAsync(filePath, cancellationToken);
+        var drafts = new List<ChunkDraft>(windows.Count);
+        for (int i = 0; i < windows.Count; i++)
+        {
+            var window = windows[i];
+            var embedding = await _embeddings.EmbedAudioAsync(window.Features, cancellationToken);
+            drafts.Add(new ChunkDraft(i + 1, Modality.Audio, window.StartMs, window.EndMs, null, embedding));
+        }
+
+        return drafts;
+    }
+
+    private static async Task<string> ComputeContentHashAsync(string filePath, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true);
+        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
+        return Convert.ToHexStringLower(hash);
     }
 
     private static IEnumerable<string> EnumerateFilesSafely(string rootPath, IngestOptions options)
@@ -168,7 +300,7 @@ public class ContentIngester : IContentIngester
                 pendingDirectories.Push(directory);
             }
 
-            foreach (var file in Directory.EnumerateFiles(currentDirectory))
+            foreach (var file in Directory.EnumerateFiles(currentDirectory).Order(StringComparer.Ordinal))
             {
                 if (!options.AllowSymlinks && IsReparsePoint(file))
                 {
@@ -241,4 +373,68 @@ public class ContentIngester : IContentIngester
             ? rootPath
             : rootPath + Path.DirectorySeparatorChar;
     }
+}
+
+/// <summary>
+/// Locates chunk texts within the original file content as char offsets. Chunkers trim chunks and
+/// may re-join lines with a different newline, so matching is done on newline-normalised text and
+/// mapped back to offsets in the original string.
+/// </summary>
+public static class TextChunkLocator
+{
+    /// <summary>
+    /// Returns, for each chunk, its [Start, End) char offsets in <paramref name="content"/>, or null if the
+    /// chunk could not be found. Chunks are expected in document order; the search resumes after the
+    /// previous match so repeated chunk texts map to successive occurrences.
+    /// </summary>
+    public static IReadOnlyList<(long Start, long End)?> Locate(string content, IReadOnlyList<string> chunks)
+    {
+        // Normalise \r\n and lone \r to \n, remembering each normalised char's original offset.
+        var normalised = new StringBuilder(content.Length);
+        var map = new List<int>(content.Length);
+        for (int i = 0; i < content.Length; i++)
+        {
+            var c = content[i];
+            if (c == '\r')
+            {
+                normalised.Append('\n');
+                map.Add(i);
+                if (i + 1 < content.Length && content[i + 1] == '\n') i++;
+            }
+            else
+            {
+                normalised.Append(c);
+                map.Add(i);
+            }
+        }
+
+        var text = normalised.ToString();
+        var result = new (long Start, long End)?[chunks.Count];
+        var cursor = 0;
+
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            var chunk = NormaliseNewlines(chunks[i]);
+            if (chunk.Length == 0) continue;
+
+            var index = text.IndexOf(chunk, cursor, StringComparison.Ordinal);
+            if (index < 0)
+            {
+                index = text.IndexOf(chunk, StringComparison.Ordinal);
+            }
+
+            if (index < 0) continue;
+
+            var lastNormalised = index + chunk.Length - 1;
+            var start = map[index];
+            // Chunks end on a non-newline char, so the original end is one past that char.
+            var end = map[lastNormalised] + 1;
+            result[i] = (start, end);
+            cursor = index + chunk.Length;
+        }
+
+        return result;
+    }
+
+    private static string NormaliseNewlines(string s) => s.Replace("\r\n", "\n").Replace('\r', '\n');
 }

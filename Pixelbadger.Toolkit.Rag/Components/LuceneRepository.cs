@@ -6,108 +6,139 @@ using Lucene.Net.Search;
 using Lucene.Net.Search.Similarities;
 using Lucene.Net.Store;
 using Lucene.Net.Util;
-using Pixelbadger.Toolkit.Rag.Dtos;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
+/// <summary>
+/// Lucene.NET BM25 index keyed by SQL chunk id. Only text chunks are indexed; the indexed
+/// <c>content</c> field is not stored (content is hydrated from SQL).
+/// </summary>
 public class LuceneRepository : ILuceneRepository
 {
     private const LuceneVersion LUCENE_VERSION = LuceneVersion.LUCENE_48;
 
-    public async Task IndexWithLuceneAsync(string indexPath, string contentPath, List<IChunk> chunks)
+    internal const string ChunkIdField = "chunk_id";
+    internal const string DocumentIdField = "document_id";
+    internal const string SourceIdField = "source_id";
+    internal const string ContentField = "content";
+
+    /// <inheritdoc />
+    public Task ReplaceDocumentAsync(
+        string indexPath,
+        string documentGlobalId,
+        string sourceId,
+        IReadOnlyList<LuceneChunk> chunks,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        System.IO.Directory.CreateDirectory(indexPath);
+
+        // The IndexWriter holds the index write lock: open, commit and close per call
+        // (one call per document, never per chunk).
         using var indexDirectory = FSDirectory.Open(indexPath);
         using var analyzer = new StandardAnalyzer(LUCENE_VERSION);
-        var config = new IndexWriterConfig(LUCENE_VERSION, analyzer);
-
-        // Ensure consistent BM25 similarity for both indexing and searching
-        config.Similarity = new BM25Similarity();
+        var config = new IndexWriterConfig(LUCENE_VERSION, analyzer)
+        {
+            // Consistent BM25 similarity for both indexing and searching
+            Similarity = new BM25Similarity()
+        };
 
         using var writer = new IndexWriter(indexDirectory, config);
 
-        var sourceId = Path.GetFileNameWithoutExtension(contentPath);
+        writer.DeleteDocuments(new Term(DocumentIdField, documentGlobalId));
 
         foreach (var chunk in chunks)
         {
-            var doc = new Document();
-
-            // Add the chunk content as a searchable field
-            doc.Add(new TextField("content", chunk.Content, Field.Store.YES));
-
-            // Add metadata fields
-            doc.Add(new StringField("source_file", Path.GetFileName(contentPath), Field.Store.YES));
-            doc.Add(new StringField("source_path", contentPath, Field.Store.YES));
-            doc.Add(new StringField("source_id", sourceId, Field.Store.YES));
-            doc.Add(new Int32Field("paragraph_number", chunk.ChunkNumber, Field.Store.YES));
-            doc.Add(new StringField("document_id", $"{Path.GetFileName(contentPath)}_{chunk.ChunkNumber}", Field.Store.YES));
-
+            var doc = new Document
+            {
+                new Int32Field(ChunkIdField, chunk.ChunkId, Field.Store.YES),
+                new StringField(DocumentIdField, documentGlobalId, Field.Store.YES),
+                new StringField(SourceIdField, sourceId, Field.Store.YES),
+                new TextField(ContentField, chunk.Text, Field.Store.NO)
+            };
             writer.AddDocument(doc);
         }
 
         writer.Commit();
+        return Task.CompletedTask;
     }
 
-    public Task<List<SearchResult>> QueryLuceneAsync(string indexPath, string queryText, int maxResults, string[]? sourceIds)
+    /// <inheritdoc />
+    public Task<IReadOnlyList<KeywordHit>> SearchAsync(
+        string indexPath,
+        string queryText,
+        int maxResults,
+        IReadOnlyCollection<string>? sourceIds,
+        CancellationToken cancellationToken = default)
     {
-        if (!System.IO.Directory.Exists(indexPath))
+        cancellationToken.ThrowIfCancellationRequested();
+
+        IReadOnlyList<KeywordHit> empty = Array.Empty<KeywordHit>();
+
+        // A corpus may be media-only, in which case no Lucene index has been created.
+        if (maxResults < 1 || string.IsNullOrWhiteSpace(queryText) || !System.IO.Directory.Exists(indexPath))
         {
-            throw new DirectoryNotFoundException($"Index directory not found: {indexPath}");
+            return Task.FromResult(empty);
         }
 
-        var results = new List<SearchResult>();
         using var indexDirectory = FSDirectory.Open(indexPath);
-        using var analyzer = new StandardAnalyzer(LUCENE_VERSION);
-
-        using var reader = DirectoryReader.Open(indexDirectory);
-        var searcher = new IndexSearcher(reader);
-
-        // Use BM25 similarity to match indexing configuration
-        searcher.Similarity = new BM25Similarity();
-
-        var parser = new QueryParser(LUCENE_VERSION, "content", analyzer);
-
-        var contentQuery = parser.Parse(QueryParser.Escape(queryText));
-
-        Query finalQuery;
-        if (sourceIds != null && sourceIds.Length > 0)
+        if (!DirectoryReader.IndexExists(indexDirectory))
         {
-            // Create a boolean query to combine content search with source ID filter
-            var boolQuery = new BooleanQuery();
-            boolQuery.Add(contentQuery, Occur.MUST);
+            return Task.FromResult(empty);
+        }
 
-            // Add source ID filter as OR terms within a nested boolean query
+        using var analyzer = new StandardAnalyzer(LUCENE_VERSION);
+        using var reader = DirectoryReader.Open(indexDirectory);
+        var searcher = new IndexSearcher(reader)
+        {
+            Similarity = new BM25Similarity()
+        };
+
+        var contentQuery = ParseContentQuery(analyzer, queryText);
+
+        Query finalQuery = contentQuery;
+        if (sourceIds is { Count: > 0 })
+        {
             var sourceIdQuery = new BooleanQuery();
             foreach (var sourceId in sourceIds)
             {
-                var termQuery = new TermQuery(new Term("source_id", sourceId));
-                sourceIdQuery.Add(termQuery, Occur.SHOULD);
+                sourceIdQuery.Add(new TermQuery(new Term(SourceIdField, sourceId)), Occur.SHOULD);
             }
+
+            var boolQuery = new BooleanQuery();
+            boolQuery.Add(contentQuery, Occur.MUST);
             boolQuery.Add(sourceIdQuery, Occur.MUST);
             finalQuery = boolQuery;
         }
-        else
-        {
-            finalQuery = contentQuery;
-        }
 
         var hits = searcher.Search(finalQuery, maxResults);
-
+        var results = new List<KeywordHit>(hits.ScoreDocs.Length);
         foreach (var scoreDoc in hits.ScoreDocs)
         {
             var doc = searcher.Doc(scoreDoc.Doc);
-            var result = new SearchResult
+            var chunkId = doc.GetField(ChunkIdField)?.GetInt32Value();
+            if (chunkId.HasValue)
             {
-                Score = scoreDoc.Score,
-                Content = doc.Get("content") ?? string.Empty,
-                SourceFile = doc.Get("source_file") ?? string.Empty,
-                SourcePath = doc.Get("source_path") ?? string.Empty,
-                SourceId = doc.Get("source_id") ?? string.Empty,
-                ParagraphNumber = int.Parse(doc.Get("paragraph_number") ?? "0"),
-                DocumentId = doc.Get("document_id") ?? string.Empty
-            };
-            results.Add(result);
+                results.Add(new KeywordHit(chunkId.Value, scoreDoc.Score));
+            }
         }
 
-        return Task.FromResult(results);
+        return Task.FromResult<IReadOnlyList<KeywordHit>>(results);
+    }
+
+    private static Query ParseContentQuery(StandardAnalyzer analyzer, string queryText)
+    {
+        var parser = new QueryParser(LUCENE_VERSION, ContentField, analyzer);
+        try
+        {
+            return parser.Parse(QueryParser.Escape(queryText));
+        }
+        catch (ParseException)
+        {
+            // Bare operator words such as a trailing "AND" can still fail after escaping;
+            // lower-casing turns them into ordinary terms.
+            return parser.Parse(QueryParser.Escape(queryText.ToLowerInvariant()));
+        }
     }
 }
