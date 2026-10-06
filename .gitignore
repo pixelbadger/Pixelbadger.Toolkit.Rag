@@ -483,5 +483,6 @@ $RECYCLE.BIN/
 # Vim temporary swap files
 *.swp
 
-# Test assets and temporary files
+# Test assets and temporary files (committed test fixtures live in Pixelbadger.Toolkit.Rag.Tests/test-assets/)
 test-assets/
+!Pixelbadger.Toolkit.Rag.Tests/test-assets/
