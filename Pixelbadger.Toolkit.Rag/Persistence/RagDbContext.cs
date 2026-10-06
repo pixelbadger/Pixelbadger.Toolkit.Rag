@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Pixelbadger.Toolkit.Rag.Domain;
 
 namespace Pixelbadger.Toolkit.Rag.Persistence;
@@ -13,6 +14,8 @@ public sealed class RagDbContext : DbContext
 {
     public const string DocumentsTable = "Documents";
     public const string ChunksTable = "Chunks_EG2_256";
+    public const string IngestJobsTable = "IngestJobs";
+    public const string IngestJobFilesTable = "IngestJobFiles";
     public const int EmbeddingDimensions = 256;
 
     public RagDbContext(DbContextOptions<RagDbContext> options) : base(options)
@@ -22,6 +25,16 @@ public sealed class RagDbContext : DbContext
     public DbSet<Document> Documents => Set<Document>();
 
     public DbSet<Chunk> Chunks => Set<Chunk>();
+
+    public DbSet<IngestJob> IngestJobs => Set<IngestJob>();
+
+    public DbSet<IngestJobFile> IngestJobFiles => Set<IngestJobFile>();
+
+    private static readonly ValueConverter<DateTime, DateTime> UtcConverter =
+        new(v => v, v => DateTime.SpecifyKind(v, DateTimeKind.Utc));
+
+    private static readonly ValueConverter<DateTime?, DateTime?> NullableUtcConverter =
+        new(v => v, v => v.HasValue ? DateTime.SpecifyKind(v.Value, DateTimeKind.Utc) : v);
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -63,6 +76,40 @@ public sealed class RagDbContext : DbContext
             e.Property(c => c.ChunkText).HasColumnType("nvarchar(max)");
             e.Property(c => c.EmbeddingModel).HasColumnType("nvarchar(64)").IsRequired();
             e.Property(c => c.Embedding).HasColumnType($"vector({EmbeddingDimensions})").IsRequired();
+        });
+
+        modelBuilder.Entity<IngestJob>(e =>
+        {
+            e.ToTable(IngestJobsTable);
+            e.HasKey(j => j.Id);
+            // Assigned in code (Guid v7), like chunk ids.
+            e.Property(j => j.Id).ValueGeneratedNever();
+            e.Property(j => j.Status).HasConversion<int>();
+            e.Property(j => j.CreatedAtUtc).HasColumnType("datetime2").HasConversion(UtcConverter);
+            e.Property(j => j.StartedAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
+            e.Property(j => j.CompletedAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
+            e.Property(j => j.LeaseExpiresAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
+            e.Property(j => j.LeaseOwner).HasColumnType("nvarchar(128)");
+            e.Property(j => j.Error).HasColumnType("nvarchar(max)");
+            e.HasIndex(j => new { j.Status, j.CreatedAtUtc }).HasDatabaseName("IX_IngestJobs_Status_CreatedAtUtc");
+        });
+
+        modelBuilder.Entity<IngestJobFile>(e =>
+        {
+            e.ToTable(IngestJobFilesTable);
+            e.HasKey(f => f.Id);
+            e.HasOne(f => f.Job)
+                .WithMany(j => j.Files)
+                .HasForeignKey(f => f.JobId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.HasIndex(f => new { f.JobId, f.Ordinal }).HasDatabaseName("IX_IngestJobFiles_Job");
+            e.Property(f => f.LogicalPath).HasColumnType("nvarchar(1024)").IsRequired();
+            // Nullable: cleared once the file is terminal.
+            e.Property(f => f.Content).HasColumnType("varbinary(max)");
+            e.Property(f => f.Status).HasConversion<int>();
+            e.Property(f => f.DocumentGlobalId).HasColumnType("nvarchar(64)");
+            e.Property(f => f.Modality).HasConversion<byte>().HasColumnType("tinyint");
+            e.Property(f => f.Error).HasColumnType("nvarchar(max)");
         });
     }
 }
