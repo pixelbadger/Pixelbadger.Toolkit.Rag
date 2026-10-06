@@ -2,32 +2,36 @@ using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Protocol;
 using Moq;
-using Pixelbadger.Toolkit.Rag.Commands;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Dtos;
+using Pixelbadger.Toolkit.Rag.Mcp;
 
-namespace Pixelbadger.Toolkit.Rag.Tests.Host;
+namespace Pixelbadger.Toolkit.Rag.Tests.Mcp;
 
 public class McpOutputTests
 {
+    private static readonly Guid TextDoc = Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    private static readonly Guid ImageDoc = Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    private static readonly Guid AudioDoc = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
+
     private static SearchResult Text(string content = "Mars is red.") => new()
     {
-        Score = 0.03279f, ChunkId = Guid.Parse("11111111-1111-1111-1111-111111111111"), DocumentId = "doc_text",
-        SourceFile = "mars.md", SourcePath = "/secret/path/mars.md", SourceId = "src-1", Ordinal = 3,
+        Score = 0.03279f, ChunkId = Guid.Parse("11111111-1111-1111-1111-111111111111"), DocumentId = TextDoc,
+        SourceFile = "mars.md", SourcePath = "/secret/path/mars.md", Ordinal = 3,
         Modality = Modality.Text, LocatorStart = 120, LocatorEnd = 480, Content = content
     };
 
     private static SearchResult Image() => new()
     {
-        Score = 0.02f, ChunkId = Guid.Parse("22222222-2222-2222-2222-222222222222"), DocumentId = "doc_img",
-        SourceFile = "planet.png", SourceId = "src-2", Ordinal = 1, Modality = Modality.Image
+        Score = 0.02f, ChunkId = Guid.Parse("22222222-2222-2222-2222-222222222222"), DocumentId = ImageDoc,
+        SourceFile = "planet.png", Ordinal = 1, Modality = Modality.Image
     };
 
     private static SearchResult Audio() => new()
     {
-        Score = 0.01f, ChunkId = Guid.Parse("33333333-3333-3333-3333-333333333333"), DocumentId = "doc_aud",
-        SourceFile = "talk.mp3", SourceId = "src-3", Ordinal = 2, Modality = Modality.Audio,
+        Score = 0.01f, ChunkId = Guid.Parse("33333333-3333-3333-3333-333333333333"), DocumentId = AudioDoc,
+        SourceFile = "talk.mp3", Ordinal = 2, Modality = Modality.Audio,
         LocatorStart = 30_000, LocatorEnd = 65_500
     };
 
@@ -40,9 +44,9 @@ public class McpOutputTests
         text.Should().Contain("Found 1 relevant result(s) using hybrid search")
             .And.Contain("Result 1 (Score: 0.0328)")
             .And.Contain("Chunk ID: 11111111-1111-1111-1111-111111111111")
-            .And.Contain("Document ID: doc_text")
+            .And.Contain($"Document ID: {TextDoc}")
             .And.Contain("Source: mars.md (chunk 3)")
-            .And.Contain("Source ID: src-1")
+            .And.NotContain("Source ID")
             .And.Contain("Modality: Text")
             .And.Contain("Locator: chars 120–480")
             .And.Contain("Untrusted content: Mars is red.");
@@ -65,21 +69,6 @@ public class McpOutputTests
     {
         SearchResultFormatter.FormatForMcp([]).Should().Be("No relevant documents found for the query.");
     }
-
-    [Fact]
-    public void Cli_ListsRankScoreIdsSourceModalityLocatorAndContent()
-    {
-        var text = SearchResultFormatter.FormatForCli([Text(), Image(), Audio()]);
-
-        text.Should().Contain("Found 3 result(s) using hybrid search");
-        text.Should().Contain("Result 1 (Score: 0.0328)").And.Contain("Result 2 (Score: 0.0200)").And.Contain("Result 3 (Score: 0.0100)");
-        text.Should().Contain("Chunk ID: 22222222-2222-2222-2222-222222222222").And.Contain("Document ID: doc_aud");
-        text.Should().Contain("Modality: Image").And.Contain("Modality: Audio");
-        text.Should().Contain("Content: Mars is red.").And.Contain("Content: [image]").And.Contain("Content: [audio 00:30–01:05]");
-    }
-
-    [Fact]
-    public void Cli_Empty() => SearchResultFormatter.FormatForCli([]).Should().Be("No results found.");
 
     [Theory]
     [InlineData(0, "00:00")]
@@ -115,15 +104,30 @@ public class McpOutputTests
     public async Task Tool_ReturnsFormattedResults_AndPassesArguments()
     {
         var search = new Mock<ISearchService>();
-        search.Setup(s => s.SearchAsync("mars", 5, It.Is<IReadOnlyCollection<string>?>(x => x!.Single() == "src-1"), It.IsAny<CancellationToken>()))
+        search.Setup(s => s.SearchAsync("mars", 5, It.Is<IReadOnlyCollection<Guid>?>(x => x!.Single() == TextDoc), It.IsAny<CancellationToken>()))
             .ReturnsAsync([Text()]);
         var tool = new McpRagServer(search.Object, NullLogger<McpRagServer>.Instance);
 
-        var result = await tool.Search("mars", sourceIds: ["src-1"]);
+        var result = await tool.Search("mars", documentIds: [TextDoc.ToString()]);
 
         result.IsError.Should().NotBe(true);
         ContentOf(result).Should().Contain("Untrusted content: Mars is red.");
         search.VerifyAll();
+    }
+
+    [Theory]
+    [InlineData("doc_0123456789abcdef")]
+    [InlineData("")]
+    [InlineData("not-a-guid")]
+    public async Task Tool_BadDocumentId_IsAnErrorNamingTheValue_AndDoesNotSearch(string bad)
+    {
+        var search = new Mock<ISearchService>(MockBehavior.Strict);
+        var tool = new McpRagServer(search.Object, NullLogger<McpRagServer>.Instance);
+
+        var result = await tool.Search("q", documentIds: [TextDoc.ToString(), bad]);
+
+        result.IsError.Should().BeTrue();
+        ContentOf(result).Should().Contain("documentIds").And.Contain($"'{bad}'");
     }
 
     [Fact]
@@ -157,7 +161,7 @@ public class McpOutputTests
     public async Task Tool_ArgumentException_SurfacesItsMessage()
     {
         var search = new Mock<ISearchService>();
-        search.Setup(s => s.SearchAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<IReadOnlyCollection<string>?>(), It.IsAny<CancellationToken>()))
+        search.Setup(s => s.SearchAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<IReadOnlyCollection<Guid>?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new ArgumentException("Query is too long"));
         var tool = new McpRagServer(search.Object, NullLogger<McpRagServer>.Instance);
 
@@ -171,7 +175,7 @@ public class McpOutputTests
     public async Task Tool_OtherException_IsGenericAndDoesNotLeakDetails()
     {
         var search = new Mock<ISearchService>();
-        search.Setup(s => s.SearchAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<IReadOnlyCollection<string>?>(), It.IsAny<CancellationToken>()))
+        search.Setup(s => s.SearchAsync(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<IReadOnlyCollection<Guid>?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("connection string Password=hunter2"));
         var tool = new McpRagServer(search.Object, NullLogger<McpRagServer>.Instance);
 

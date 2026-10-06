@@ -34,7 +34,7 @@ def short(n):
     return (0.3 * np.sin(2 * np.pi * 1000 * t)).astype(np.float32)
 
 
-fe = Gemma4AudioFeatureExtractor()  # defaults == processor_config.json values in the reference doc
+fe = Gemma4AudioFeatureExtractor()  # defaults == processor_config.json values
 out = {"extractor": "Gemma4AudioFeatureExtractor", "cases": {}}
 for name, gen, n in [("tones", tones, 6400), ("chirp", chirp, 5000), ("short", short, 300)]:
     r = fe([gen(n)])  # list form: the bare-ndarray path of the extractor squeezes wrongly

@@ -13,7 +13,7 @@ public interface IGemmaTextModel
     float[] Run(TextBatch batch, EncodedFeatures? imageFeatures, EncodedFeatures? audioFeatures, CancellationToken cancellationToken);
 }
 
-/// <summary>ONNX Runtime implementation of <see cref="IGemmaTextModel"/> (reference §3, §8).</summary>
+/// <summary>ONNX Runtime implementation of <see cref="IGemmaTextModel"/>.</summary>
 public sealed class OnnxGemmaTextModel : IGemmaTextModel
 {
     private static readonly long[] EmptyFeatureShape = { 0, EncodedFeatures.FeatureWidth };
@@ -38,7 +38,7 @@ public sealed class OnnxGemmaTextModel : IGemmaTextModel
         using var video = OrtValue.CreateTensorValueFromMemory(empty, EmptyFeatureShape);
         using var audio = FeatureTensor(audioFeatures, empty);
 
-        // All five inputs are required; absent modalities are empty [0, 512] tensors (reference §3).
+        // All five inputs are required; absent modalities are empty [0, 512] tensors.
         var inputs = new Dictionary<string, OrtValue>
         {
             ["input_ids"] = ids,

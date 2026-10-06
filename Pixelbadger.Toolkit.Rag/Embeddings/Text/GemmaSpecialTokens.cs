@@ -1,6 +1,6 @@
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Text;
 
-/// <summary>Special token ids of EmbeddingGemma 2 (reference §4).</summary>
+/// <summary>Special token ids of EmbeddingGemma 2.</summary>
 public static class GemmaSpecialTokens
 {
     public const int Pad = 0;

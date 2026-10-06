@@ -84,19 +84,14 @@ namespace Pixelbadger.Toolkit.Rag.Migrations
                         .IsRequired()
                         .HasColumnType("char(64)");
 
-                    b.Property<string>("GlobalId")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(64)");
+                    b.Property<Guid>("GlobalId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<byte>("IndexStatus")
                         .HasColumnType("tinyint");
 
                     b.Property<byte>("Modality")
                         .HasColumnType("tinyint");
-
-                    b.Property<string>("SourceId")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(256)");
 
                     b.Property<string>("SourcePath")
                         .IsRequired()
@@ -113,9 +108,66 @@ namespace Pixelbadger.Toolkit.Rag.Migrations
                     b.HasIndex("GlobalId")
                         .IsUnique();
 
-                    b.HasIndex("SourceId");
-
                     b.ToTable("Documents", (string)null);
+                });
+
+            modelBuilder.Entity("Pixelbadger.Toolkit.Rag.Domain.IngestJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("Attempts")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("ChunkCount")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<byte[]>("Content")
+                        .HasColumnType("varbinary(max)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("DocumentId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Error")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("LeaseExpiresAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("LeaseOwner")
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("LogicalPath")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<int>("MaxChunkCharacters")
+                        .HasColumnType("int");
+
+                    b.Property<long>("SizeBytes")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("StartedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DocumentId", "CreatedAtUtc")
+                        .HasDatabaseName("IX_IngestJobs_Document_CreatedAtUtc");
+
+                    b.HasIndex("Status", "CreatedAtUtc")
+                        .HasDatabaseName("IX_IngestJobs_Status_CreatedAtUtc");
+
+                    b.ToTable("IngestJobs", (string)null);
                 });
 
             modelBuilder.Entity("Pixelbadger.Toolkit.Rag.Domain.Chunk", b =>
@@ -129,9 +181,22 @@ namespace Pixelbadger.Toolkit.Rag.Migrations
                     b.Navigation("Document");
                 });
 
+            modelBuilder.Entity("Pixelbadger.Toolkit.Rag.Domain.IngestJob", b =>
+                {
+                    b.HasOne("Pixelbadger.Toolkit.Rag.Domain.Document", "Document")
+                        .WithMany("Jobs")
+                        .HasForeignKey("DocumentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Document");
+                });
+
             modelBuilder.Entity("Pixelbadger.Toolkit.Rag.Domain.Document", b =>
                 {
                     b.Navigation("Chunks");
+
+                    b.Navigation("Jobs");
                 });
 #pragma warning restore 612, 618
         }

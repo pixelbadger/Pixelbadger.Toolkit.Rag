@@ -15,13 +15,13 @@ public sealed record AudioPreprocessorOptions
 
     /// <summary>
     /// Length of one <see cref="AudioWindow"/> (= one chunk). ~30 s: HF's extractor defaults to
-    /// <c>max_length=480000</c> samples (30 s) [verified in Gemma4AudioFeatureExtractor], and the reference
-    /// recommends ~30 s windows.
+    /// <c>max_length=480000</c> samples (30 s) [verified in Gemma4AudioFeatureExtractor], and
+    /// ~30 s windows are the recommended size.
     /// </summary>
     public double WindowSeconds { get; init; } = 30.0;
 
     /// <summary>
-    /// Soft tokens per clip (<c>audio_seq_length</c>, 280 in the EmbeddingGemma 2 config per the reference). At 40 ms per token a
+    /// Soft tokens per clip (<c>audio_seq_length</c>, 280 in the EmbeddingGemma 2 config). At 40 ms per token a
     /// clip is 11.2 s = 179,200 samples = 1,119 mel frames, which the encoder's two stride-2 convs reduce to exactly 280 tokens.
     /// </summary>
     public int ClipTokens { get; init; } = 280;

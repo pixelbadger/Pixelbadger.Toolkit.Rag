@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
 using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Dtos;
@@ -19,139 +20,56 @@ public class ContentIngester : IContentIngester
     private readonly RagOptions _options;
     private readonly IDocumentStore _store;
     private readonly ILuceneRepository _lucene;
+    private readonly IndexWriteGate _gate;
     private readonly IEmbeddingService _embeddings;
     private readonly ChunkerFactory _chunkerFactory;
     private readonly FileReaderFactory _fileReaderFactory;
     private readonly IImagePreprocessor _imagePreprocessor;
     private readonly IAudioPreprocessor _audioPreprocessor;
+    private readonly ILogger<ContentIngester> _logger;
 
     public ContentIngester(
         RagOptions options,
         IDocumentStore store,
         ILuceneRepository lucene,
+        IndexWriteGate gate,
         IEmbeddingService embeddings,
         ChunkerFactory chunkerFactory,
         FileReaderFactory fileReaderFactory,
         IImagePreprocessor imagePreprocessor,
-        IAudioPreprocessor audioPreprocessor)
+        IAudioPreprocessor audioPreprocessor,
+        ILogger<ContentIngester> logger)
     {
         _options = options;
         _store = store;
         _lucene = lucene;
+        _gate = gate;
         _embeddings = embeddings;
         _chunkerFactory = chunkerFactory;
         _fileReaderFactory = fileReaderFactory;
         _imagePreprocessor = imagePreprocessor;
         _audioPreprocessor = audioPreprocessor;
+        _logger = logger;
     }
 
     /// <inheritdoc />
-    public async Task<IngestResult> IngestFileAsync(string filePath, IngestOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<IngestResult> IngestAsync(IngestSource source, IngestOptions? options = null, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(source);
         options ??= new IngestOptions();
 
-        if (!File.Exists(filePath))
+        if (!File.Exists(source.LocalPath))
         {
-            throw new FileNotFoundException($"Content file not found: {filePath}");
+            throw new FileNotFoundException($"Content file not found: {source.LocalPath}");
         }
 
         ValidateIngestOptions(options);
-        ValidateFileForIngestion(filePath, options);
+        ValidateFileForIngestion(source, options);
 
-        var result = await IngestCoreAsync(filePath, options, cancellationToken);
-        await _store.EnsureVectorIndexAsync(cancellationToken);
+        var result = await IngestCoreAsync(source, options, cancellationToken);
+        _logger.LogDebug("Ingested {LogicalPath}: {ChunkCount} {Modality} chunk(s)", result.FilePath, result.ChunkCount, result.Modality);
         return result;
     }
-
-    /// <inheritdoc />
-    public async Task<IngestSummary> IngestFolderAsync(string folderPath, IngestOptions? options = null, CancellationToken cancellationToken = default)
-    {
-        options ??= new IngestOptions();
-
-        if (!Directory.Exists(folderPath))
-        {
-            throw new DirectoryNotFoundException($"Folder not found: {folderPath}");
-        }
-
-        ValidateIngestOptions(options);
-
-        if (!options.AllowSymlinks && IsReparsePoint(folderPath))
-        {
-            throw new InvalidOperationException($"Refusing to ingest symbolic link or reparse point folder: {folderPath}");
-        }
-
-        var rootPath = NormalizeRootPath(Path.GetFullPath(folderPath));
-
-        // Discover files without following symlinked directories by default.
-        var supportedFiles = EnumerateFilesSafely(rootPath, options).Where(IsSupported).ToList();
-        if (supportedFiles.Count > options.MaxFiles)
-        {
-            throw new InvalidOperationException($"Folder contains {supportedFiles.Count} supported files, exceeding the limit of {options.MaxFiles}");
-        }
-
-        var succeeded = new List<IngestResult>();
-        var failed = new List<IngestFailure>();
-        var skipped = 0;
-
-        if (supportedFiles.Count == 0)
-        {
-            Console.WriteLine($"No supported files found in {folderPath}");
-            Console.WriteLine($"Supported extensions: {string.Join(", ", SupportedExtensions)}");
-            return new IngestSummary(succeeded, failed, skipped);
-        }
-
-        Console.WriteLine($"Found {supportedFiles.Count} supported files to ingest");
-
-        foreach (var filePath in supportedFiles)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var fileName = Path.GetFileName(filePath);
-
-            try
-            {
-                Console.WriteLine($"Ingesting: {fileName}");
-                ValidateFileWithinRoot(filePath, rootPath);
-                ValidateFileForIngestion(filePath, options);
-
-                var result = await IngestCoreAsync(filePath, options, cancellationToken);
-                if (result.ChunkCount == 0)
-                {
-                    Console.WriteLine($"  Skipped (no content): {fileName}");
-                    skipped++;
-                    continue;
-                }
-
-                Console.WriteLine($"  Indexed {result.ChunkCount} chunks from {fileName}");
-                succeeded.Add(result);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"  Error ingesting {fileName}: {ex.Message}");
-                failed.Add(new IngestFailure(filePath, ex.Message));
-                // Continue processing other files
-            }
-        }
-
-        // Once per batch (idempotent; creates the vector index once enough rows exist).
-        await _store.EnsureVectorIndexAsync(cancellationToken);
-
-        Console.WriteLine($"Completed ingestion of {supportedFiles.Count} files");
-        return new IngestSummary(succeeded, failed, skipped);
-    }
-
-    private IEnumerable<string> SupportedExtensions =>
-        _fileReaderFactory.SupportedExtensions
-            .Where(e => MediaTypes.TextExtensions.Contains(e))
-            .Concat(MediaTypes.ImageExtensions)
-            .Concat(MediaTypes.AudioExtensions)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Order(StringComparer.OrdinalIgnoreCase);
-
-    private bool IsSupported(string filePath) => GetModality(filePath) != null;
 
     private Modality? GetModality(string filePath)
     {
@@ -159,61 +77,63 @@ public class ContentIngester : IContentIngester
         return modality == Modality.Text && !_fileReaderFactory.CanRead(filePath) ? null : modality;
     }
 
-    private async Task<IngestResult> IngestCoreAsync(string filePath, IngestOptions options, CancellationToken cancellationToken)
+    private async Task<IngestResult> IngestCoreAsync(IngestSource source, IngestOptions options, CancellationToken cancellationToken)
     {
-        var modality = GetModality(filePath)
-            ?? throw new NotSupportedException($"Unsupported file type: {Path.GetExtension(filePath)}");
+        var logicalPath = LogicalPath.Normalize(source.LogicalPath);
+        var modality = GetModality(logicalPath)
+            ?? throw new NotSupportedException($"Unsupported file type: {Path.GetExtension(logicalPath)}");
 
-        var fullPath = Path.GetFullPath(filePath);
-        var fileName = Path.GetFileName(fullPath);
-        var documentGlobalId = DocumentIds.FromSourcePath(fullPath);
-        var sourceId = Path.GetFileNameWithoutExtension(fullPath);
+        var fileName = Path.GetFileName(logicalPath);
+        var documentId = source.DocumentId;
 
         var draft = new DocumentDraft(
-            documentGlobalId,
-            fullPath,
-            sourceId,
+            logicalPath,
             fileName,
             modality,
-            await ComputeContentHashAsync(fullPath, cancellationToken));
+            await ComputeContentHashAsync(source.LocalPath, cancellationToken));
 
+        // Embedding (the slow part) happens outside the gate; only the SQL + Lucene writes are serialised with deletes.
         var chunks = modality switch
         {
-            Modality.Text => await BuildTextChunksAsync(fullPath, fileName, options, cancellationToken),
-            Modality.Image => await BuildImageChunksAsync(fullPath, cancellationToken),
-            _ => await BuildAudioChunksAsync(fullPath, cancellationToken)
+            Modality.Text => await BuildTextChunksAsync(source.LocalPath, fileName, logicalPath, options, cancellationToken),
+            Modality.Image => await BuildImageChunksAsync(source.LocalPath, cancellationToken),
+            _ => await BuildAudioChunksAsync(source.LocalPath, cancellationToken)
         };
 
-        var records = await _store.ReplaceDocumentAsync(draft, chunks, cancellationToken);
-
-        try
+        using (await _gate.EnterAsync(cancellationToken))
         {
-            // Image/audio chunks are vector-only: BM25 indexes text chunks.
-            var luceneChunks = records
-                .Where(r => r.Modality == Modality.Text && !string.IsNullOrWhiteSpace(r.Text))
-                .Select(r => new LuceneChunk(r.ChunkId, r.Text!))
-                .ToList();
+            // Throws DocumentNotFoundException when the document was deleted meanwhile (nothing is written).
+            var records = await _store.ReplaceDocumentAsync(documentId, draft, chunks, cancellationToken);
 
-            if (luceneChunks.Count > 0 || modality == Modality.Text)
+            try
             {
-                // Always called for text so stale entries of a previous version are removed.
-                await _lucene.ReplaceDocumentAsync(_options.IndexPath, documentGlobalId, sourceId, luceneChunks, cancellationToken);
-            }
-        }
-        catch
-        {
-            await TrySetFailedAsync(documentGlobalId);
-            throw;
-        }
+                // Image/audio chunks are vector-only: BM25 indexes text chunks.
+                var luceneChunks = records
+                    .Where(r => r.Modality == Modality.Text && !string.IsNullOrWhiteSpace(r.Text))
+                    .Select(r => new LuceneChunk(r.ChunkId, r.Text!))
+                    .ToList();
 
-        return new IngestResult(fullPath, documentGlobalId, modality, records.Count);
+                if (luceneChunks.Count > 0 || modality == Modality.Text)
+                {
+                    // Always called for text so stale entries of a previous version are removed.
+                    await _lucene.ReplaceDocumentAsync(_options.IndexPath, documentId, luceneChunks, cancellationToken);
+                }
+            }
+            catch
+            {
+                await TrySetFailedAsync(documentId);
+                throw;
+            }
+
+            return new IngestResult(logicalPath, documentId, modality, records.Count);
+        }
     }
 
-    private async Task TrySetFailedAsync(string documentGlobalId)
+    private async Task TrySetFailedAsync(Guid documentId)
     {
         try
         {
-            await _store.SetIndexStatusAsync(documentGlobalId, IndexStatus.Failed, CancellationToken.None);
+            await _store.SetIndexStatusAsync(documentId, IndexStatus.Failed, CancellationToken.None);
         }
         catch
         {
@@ -221,7 +141,7 @@ public class ContentIngester : IContentIngester
         }
     }
 
-    private async Task<List<ChunkDraft>> BuildTextChunksAsync(string filePath, string title, IngestOptions options, CancellationToken cancellationToken)
+    private async Task<List<ChunkDraft>> BuildTextChunksAsync(string filePath, string title, string logicalPath, IngestOptions options, CancellationToken cancellationToken)
     {
         var reader = _fileReaderFactory.GetReader(filePath);
         var content = await reader.ReadTextAsync(filePath);
@@ -229,7 +149,7 @@ public class ContentIngester : IContentIngester
 
         // Filter out empty chunks
         var nonEmpty = chunks.Where(c => !string.IsNullOrWhiteSpace(c.Content)).ToList();
-        ValidateChunksForIngestion(filePath, nonEmpty, options);
+        ValidateChunksForIngestion(logicalPath, nonEmpty, options);
 
         if (nonEmpty.Count == 0)
         {
@@ -241,7 +161,7 @@ public class ContentIngester : IContentIngester
         var embeddings = await _embeddings.EmbedDocumentTextAsync(title, texts, cancellationToken);
         if (embeddings.Count != texts.Count)
         {
-            throw new InvalidOperationException($"Embedding service returned {embeddings.Count} vectors for {texts.Count} chunks of '{filePath}'");
+            throw new InvalidOperationException($"Embedding service returned {embeddings.Count} vectors for {texts.Count} chunks of '{logicalPath}'");
         }
 
         var drafts = new List<ChunkDraft>(texts.Count);
@@ -281,47 +201,11 @@ public class ContentIngester : IContentIngester
         return Convert.ToHexStringLower(hash);
     }
 
-    private static IEnumerable<string> EnumerateFilesSafely(string rootPath, IngestOptions options)
-    {
-        var pendingDirectories = new Stack<string>();
-        pendingDirectories.Push(rootPath);
-
-        while (pendingDirectories.Count > 0)
-        {
-            var currentDirectory = pendingDirectories.Pop();
-
-            foreach (var directory in Directory.EnumerateDirectories(currentDirectory))
-            {
-                if (!options.AllowSymlinks && IsReparsePoint(directory))
-                {
-                    continue;
-                }
-
-                pendingDirectories.Push(directory);
-            }
-
-            foreach (var file in Directory.EnumerateFiles(currentDirectory).Order(StringComparer.Ordinal))
-            {
-                if (!options.AllowSymlinks && IsReparsePoint(file))
-                {
-                    continue;
-                }
-
-                yield return file;
-            }
-        }
-    }
-
     private static void ValidateIngestOptions(IngestOptions options)
     {
         if (options.MaxFileSizeBytes < 1)
         {
             throw new ArgumentOutOfRangeException(nameof(options), "MaxFileSizeBytes must be greater than zero");
-        }
-
-        if (options.MaxFiles < 1)
-        {
-            throw new ArgumentOutOfRangeException(nameof(options), "MaxFiles must be greater than zero");
         }
 
         if (options.MaxChunkCharacters < 1)
@@ -330,48 +214,22 @@ public class ContentIngester : IContentIngester
         }
     }
 
-    private static void ValidateFileForIngestion(string filePath, IngestOptions options)
+    private static void ValidateFileForIngestion(IngestSource source, IngestOptions options)
     {
-        if (!options.AllowSymlinks && IsReparsePoint(filePath))
-        {
-            throw new InvalidOperationException($"Refusing to ingest symbolic link or reparse point file: {filePath}");
-        }
-
-        var fileInfo = new FileInfo(filePath);
+        var fileInfo = new FileInfo(source.LocalPath);
         if (fileInfo.Length > options.MaxFileSizeBytes)
         {
-            throw new InvalidOperationException($"File '{filePath}' is {fileInfo.Length} bytes, exceeding the limit of {options.MaxFileSizeBytes} bytes");
+            throw new InvalidOperationException($"File '{source.LogicalPath}' is {fileInfo.Length} bytes, exceeding the limit of {options.MaxFileSizeBytes} bytes");
         }
     }
 
-    private static void ValidateChunksForIngestion(string filePath, List<IChunk> chunks, IngestOptions options)
+    private static void ValidateChunksForIngestion(string logicalPath, List<IChunk> chunks, IngestOptions options)
     {
         var oversizedChunk = chunks.FirstOrDefault(chunk => chunk.Content.Length > options.MaxChunkCharacters);
         if (oversizedChunk != null)
         {
-            throw new InvalidOperationException($"File '{filePath}' produced a chunk with {oversizedChunk.Content.Length} characters, exceeding the limit of {options.MaxChunkCharacters} characters");
+            throw new InvalidOperationException($"File '{logicalPath}' produced a chunk with {oversizedChunk.Content.Length} characters, exceeding the limit of {options.MaxChunkCharacters} characters");
         }
-    }
-
-    private static void ValidateFileWithinRoot(string filePath, string rootPath)
-    {
-        var fullPath = Path.GetFullPath(filePath);
-        if (!fullPath.StartsWith(rootPath, StringComparison.Ordinal))
-        {
-            throw new InvalidOperationException($"Refusing to ingest file outside folder root: {filePath}");
-        }
-    }
-
-    private static bool IsReparsePoint(string path)
-    {
-        return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0;
-    }
-
-    private static string NormalizeRootPath(string rootPath)
-    {
-        return rootPath.EndsWith(Path.DirectorySeparatorChar)
-            ? rootPath
-            : rootPath + Path.DirectorySeparatorChar;
     }
 }
 

@@ -42,8 +42,7 @@ list printed by the script, then **commit everything** under `test-assets/golden
 If the script fails or a C# test reports `fixture <case>.<tensor> is missing`, the transformers.js release names an
 output differently than assumed: add it to the `ALIASES` map at the top of the "Reference run" section in
 `generate.mjs` (the C# side reads `pixel_values`, `pixel_position_ids`, `input_ids`, `attention_mask`, `input_features`,
-`input_features_mask`, `embedding`). The multimodal call shape `processor(text, image, audio)` follows reference
-section 9 and is marked `[verify]` in the script.
+`input_features_mask`, `embedding`). The multimodal call shape `processor(text, image, audio)` is marked `[verify]` in the script.
 
 ## 2. Run the golden tests
 
@@ -52,7 +51,7 @@ export PBRAG_MODEL_PATH=/path/to/embeddinggemma-2-ONNX
 dotnet test Pixelbadger.Toolkit.Rag.Tests --filter "FullyQualifiedName~Golden"
 ```
 
-Tolerances (reference section 9): `input_ids` exact; `pixel_values`, `input_features` atol 1e-4; `pixel_position_ids` and masks
+Tolerances: `input_ids` exact; `pixel_values`, `input_features` atol 1e-4; `pixel_position_ids` and masks
 exact; final embeddings cosine >= 0.9999 after truncating the golden 768-d vector to 256 and re-normalising. They also include
 the model card "Red Planet" check (Mars must rank first; scores within 0.05 of 0.675 / 0.853 / 0.747 / 0.778).
 

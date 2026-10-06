@@ -2,6 +2,7 @@ using FluentAssertions;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Dtos;
+using Pixelbadger.Toolkit.Rag.Ingestion;
 using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Pipeline;
@@ -14,11 +15,15 @@ public abstract class PipelineBehaviorTests : IDisposable
 {
     private readonly List<PipelineHarness> _harnesses = new();
 
-    protected abstract Task<IDocumentStore> CreateStoreAsync();
+    /// <summary>The store under test and how to create the (Queued) document an ingest writes into.</summary>
+    protected sealed record StoreUnderTest(IDocumentStore Store, Func<string, Task<Guid>> CreateDocument);
 
-    protected async Task<PipelineHarness> NewHarnessAsync()
+    protected abstract Task<StoreUnderTest> CreateStoreAsync();
+
+    protected async Task<PipelineHarness> NewHarnessAsync(Func<ILuceneRepository, ILuceneRepository>? decorateLucene = null)
     {
-        var harness = new PipelineHarness(await CreateStoreAsync());
+        var (store, createDocument) = await CreateStoreAsync();
+        var harness = new PipelineHarness(store, decorateLucene?.Invoke(new LuceneRepository()), createDocument);
         _harnesses.Add(harness);
         return harness;
     }
@@ -40,18 +45,19 @@ public abstract class PipelineBehaviorTests : IDisposable
         const string content = "Alpha paragraph about apples.\n\nBeta paragraph about bananas.";
         var path = h.Write("fruit.txt", content);
 
-        var result = await h.Ingester.IngestFileAsync(path);
+        var result = await h.IngestAsync(path);
 
         result.Modality.Should().Be(Modality.Text);
         result.ChunkCount.Should().Be(2);
-        result.DocumentId.Should().Be(DocumentIds.FromSourcePath(path));
+        result.DocumentId.Should().NotBeEmpty();
+        result.FilePath.Should().Be("fruit.txt");
 
         var results = await h.Search.SearchAsync("bananas", 5);
         var banana = results.Single(r => r.Content!.Contains("bananas"));
         banana.Ordinal.Should().Be(2);
-        banana.SourceId.Should().Be("fruit");
+        banana.DocumentId.Should().Be(result.DocumentId);
         banana.SourceFile.Should().Be("fruit.txt");
-        banana.SourcePath.Should().Be(Path.GetFullPath(path));
+        banana.SourcePath.Should().Be("fruit.txt");
         content.Substring((int)banana.LocatorStart!.Value, (int)(banana.LocatorEnd!.Value - banana.LocatorStart.Value))
             .Should().Be(banana.Content);
     }
@@ -61,12 +67,13 @@ public abstract class PipelineBehaviorTests : IDisposable
     {
         using var h = await NewHarnessAsync();
         var path = h.Write("doc.txt", "zebra stripes\n\nzebra herd");
-        await h.Ingester.IngestFileAsync(path);
+        var first = await h.IngestAsync(path);
         (await h.Search.SearchAsync("zebra", 10)).Should().HaveCount(2);
 
         File.WriteAllText(path, "giraffe neck");
-        var second = await h.Ingester.IngestFileAsync(path);
+        var second = await h.IngestAsync(path, documentId: first.DocumentId);
 
+        second.DocumentId.Should().Be(first.DocumentId);
         second.ChunkCount.Should().Be(1);
         var results = await h.Search.SearchAsync("zebra", 10);
         results.Should().OnlyContain(r => !r.Content!.Contains("zebra"));
@@ -81,7 +88,7 @@ public abstract class PipelineBehaviorTests : IDisposable
         h.Write("a.txt", "one\n\ntwo\n\nthree");
         h.Write("b.md", "# H1\nx\n\n# H2\ny");
 
-        await h.Ingester.IngestFolderAsync(h.ContentDir);
+        await h.IngestAllAsync();
 
         var results = await h.Search.SearchAsync("one two three x y H1 H2", 50);
         results.Select(r => r.ChunkId).Should().OnlyHaveUniqueItems();
@@ -94,7 +101,7 @@ public abstract class PipelineBehaviorTests : IDisposable
         using var h = await NewHarnessAsync();
         var path = h.WriteBytes("photo.png", [1, 2, 3, 4, 5]);
 
-        var result = await h.Ingester.IngestFileAsync(path);
+        var result = await h.IngestAsync(path);
 
         result.Modality.Should().Be(Modality.Image);
         result.ChunkCount.Should().Be(1);
@@ -117,7 +124,7 @@ public abstract class PipelineBehaviorTests : IDisposable
         h.Audio.WindowCount = 3;
         var path = h.WriteBytes("talk.wav", [9, 9, 9]);
 
-        var result = await h.Ingester.IngestFileAsync(path);
+        var result = await h.IngestAsync(path);
 
         result.Modality.Should().Be(Modality.Audio);
         result.ChunkCount.Should().Be(3);
@@ -129,57 +136,130 @@ public abstract class PipelineBehaviorTests : IDisposable
     }
 
     [SkippableFact]
-    public async Task IngestFolder_RoutesByExtension_AndIgnoresUnsupportedFiles()
+    public async Task Ingest_RoutesByExtension_AndKeepsLogicalPaths()
     {
         using var h = await NewHarnessAsync();
         h.Write("notes.txt", "plain notes");
         h.Write("sub/readme.md", "# Title\nmarkdown body");
         h.WriteBytes("sub/deep/pic.jpg", [1, 2, 3]);
         h.WriteBytes("clip.mp3", [4, 5, 6]);
-        h.Write("ignored.pdf", "not supported");
 
-        var summary = await h.Ingester.IngestFolderAsync(h.ContentDir);
+        var results = await h.IngestAllAsync();
 
-        summary.Failed.Should().BeEmpty();
-        summary.Succeeded.Select(s => Path.GetFileName(s.FilePath)).Should().BeEquivalentTo("notes.txt", "readme.md", "pic.jpg", "clip.mp3");
-        summary.Succeeded.Select(s => s.Modality).Order().Should().Equal(Modality.Text, Modality.Text, Modality.Image, Modality.Audio);
+        results.Select(r => r.FilePath).Should().BeEquivalentTo("notes.txt", "sub/readme.md", "sub/deep/pic.jpg", "clip.mp3");
+        results.Select(r => r.Modality).Order().Should().Equal(Modality.Text, Modality.Text, Modality.Image, Modality.Audio);
     }
 
     [SkippableFact]
-    public async Task IngestFolder_ReportsPerFileFailures_WithoutAbortingTheBatch()
+    public async Task Ingest_EmptyContent_YieldsNoChunks()
     {
         using var h = await NewHarnessAsync();
-        h.Write("good.txt", "good content");
-        h.Write("bad.txt", new string('x', 500));
 
-        var summary = await h.Ingester.IngestFolderAsync(h.ContentDir, new IngestOptions { MaxChunkCharacters = 100 });
+        var result = await h.IngestAsync(h.Write("empty.txt", "   \n\n  "));
 
-        summary.Succeeded.Should().ContainSingle(s => s.FilePath.EndsWith("good.txt"));
-        summary.Failed.Should().ContainSingle(f => f.FilePath.EndsWith("bad.txt") && f.Error.Contains("exceeding"));
+        result.ChunkCount.Should().Be(0);
     }
 
     [SkippableFact]
-    public async Task IngestFolder_CountsEmptyFilesAsSkipped()
+    public async Task Ingest_SameDocumentId_ReplacesRatherThanDuplicates_RegardlessOfLocalPath()
     {
         using var h = await NewHarnessAsync();
-        h.Write("empty.txt", "   \n\n  ");
-        h.Write("full.txt", "content");
+        var first = h.Write("tmp-one/upload.txt", "zebra stripes");
+        var second = h.Write("tmp-two/upload.txt", "giraffe neck");
+        var documentId = await h.NewDocumentAsync("docs/animals.txt");
 
-        var summary = await h.Ingester.IngestFolderAsync(h.ContentDir);
+        var a = await h.Ingester.IngestAsync(new IngestSource(first, "docs/animals.txt", documentId));
+        var b = await h.Ingester.IngestAsync(new IngestSource(second, "docs/animals.txt", documentId));
 
-        summary.Skipped.Should().Be(1);
-        summary.Succeeded.Should().ContainSingle();
+        b.DocumentId.Should().Be(a.DocumentId).And.Be(documentId);
+        var all = await h.Search.SearchAsync("zebra giraffe", 10);
+        all.Should().ContainSingle().Which.Content.Should().Be("giraffe neck");
+        all[0].DocumentId.Should().Be(documentId);
+        all[0].SourcePath.Should().Be("docs/animals.txt");
+        all[0].SourceFile.Should().Be("animals.txt");
     }
 
     [SkippableFact]
-    public async Task IngestFolder_EmptyFolder_ReturnsEmptySummary()
+    public async Task Ingest_SamePath_InTwoDocuments_AreDifferentDocuments()
     {
         using var h = await NewHarnessAsync();
+        var path = h.Write("same.txt", "shared body");
 
-        var summary = await h.Ingester.IngestFolderAsync(h.ContentDir);
+        var a = await h.IngestAsync(path);
+        var b = await h.IngestAsync(path);
 
-        summary.Succeeded.Should().BeEmpty();
-        summary.Failed.Should().BeEmpty();
+        b.DocumentId.Should().NotBe(a.DocumentId);
+        (await h.Search.SearchAsync("shared body", 10)).Should().HaveCount(2);
+    }
+
+    [SkippableFact]
+    public async Task Ingest_NormalisesLogicalPathSeparators()
+    {
+        using var h = await NewHarnessAsync();
+        var path = h.Write("x.txt", "content");
+        var documentId = await h.NewDocumentAsync("docs/x.txt");
+
+        var result = await h.Ingester.IngestAsync(new IngestSource(path, "\\docs\\x.txt", documentId));
+
+        result.FilePath.Should().Be("docs/x.txt");
+        (await h.Search.SearchAsync("content", 5)).Single().SourcePath.Should().Be("docs/x.txt");
+    }
+
+    [SkippableFact]
+    public async Task Ingest_IntoAMissingDocument_Throws_AndWritesNothing()
+    {
+        using var h = await NewHarnessAsync();
+        var path = h.Write("ghost.txt", "ghost words");
+        var unknown = Guid.NewGuid();
+
+        var act = async () => await h.Ingester.IngestAsync(new IngestSource(path, "ghost.txt", unknown));
+
+        await act.Should().ThrowAsync<DocumentNotFoundException>().Where(e => e.DocumentId == unknown);
+        (await h.Search.SearchAsync("ghost", 5)).Should().BeEmpty();
+        Directory.Exists(h.IndexPath).Should().BeFalse("nothing reached Lucene");
+    }
+
+    // ---- delete ----
+
+    [SkippableFact]
+    public async Task DeleteDocument_RemovesItsChunksFromSqlAndLucene_AndLeavesOthers()
+    {
+        using var h = await NewHarnessAsync();
+        h.Write("keep.txt", "shared phrase keep");
+        h.Write("drop.txt", "shared phrase drop");
+        var results = await h.IngestAllAsync();
+        var drop = results.Single(r => r.FilePath == "drop.txt");
+        (await h.Search.SearchAsync("shared phrase", 10)).Should().HaveCount(2);
+
+        var outcome = await h.NewDocumentService().DeleteAsync(drop.DocumentId);
+
+        outcome.Should().Be(DeleteOutcome.Deleted);
+        var left = await h.Search.SearchAsync("shared phrase", 10);
+        left.Should().ContainSingle().Which.SourcePath.Should().Be("keep.txt");
+        (await h.Lucene.SearchAsync(h.IndexPath, "drop", 10, null)).Should().BeEmpty();
+        (await h.NewDocumentService().DeleteAsync(drop.DocumentId)).Should().Be(DeleteOutcome.NotFound);
+    }
+
+    [SkippableFact]
+    public async Task DeleteDocument_LandingBetweenTheSqlAndLuceneWrites_LeavesNothingBehind()
+    {
+        PausingLuceneRepository? pausing = null;
+        using var h = await NewHarnessAsync(inner => pausing = new PausingLuceneRepository(inner));
+        var path = h.Write("race.txt", "racing words");
+        var documentId = await h.NewDocumentAsync("race.txt");
+
+        var ingest = h.Ingester.IngestAsync(new IngestSource(path, "race.txt", documentId));
+        await pausing!.Entered.WaitAsync(TimeSpan.FromSeconds(10)); // SQL written, Lucene not yet
+        var delete = h.NewDocumentService().DeleteAsync(documentId);
+        await Task.Delay(200);
+
+        delete.IsCompleted.Should().BeFalse("the delete waits for the ingest's SQL + Lucene writes");
+        pausing.Release();
+        await ingest;
+        (await delete).Should().Be(DeleteOutcome.Deleted);
+
+        (await h.Search.SearchAsync("racing", 5)).Should().BeEmpty();
+        (await h.Lucene.SearchAsync(h.IndexPath, "racing", 5, null)).Should().BeEmpty("the delete also removed the Lucene entries");
     }
 
     // ---- ingestion safety ----
@@ -189,19 +269,9 @@ public abstract class PipelineBehaviorTests : IDisposable
     {
         using var h = await NewHarnessAsync();
 
-        var act = async () => await h.Ingester.IngestFileAsync(Path.Combine(h.ContentDir, "missing.txt"));
+        var act = async () => await h.IngestAsync(Path.Combine(h.ContentDir, "missing.txt"));
 
         await act.Should().ThrowAsync<FileNotFoundException>();
-    }
-
-    [SkippableFact]
-    public async Task IngestFolder_Throws_WhenFolderMissing()
-    {
-        using var h = await NewHarnessAsync();
-
-        var act = async () => await h.Ingester.IngestFolderAsync(Path.Combine(h.ContentDir, "nope"));
-
-        await act.Should().ThrowAsync<DirectoryNotFoundException>();
     }
 
     [SkippableFact]
@@ -210,7 +280,7 @@ public abstract class PipelineBehaviorTests : IDisposable
         using var h = await NewHarnessAsync();
         var path = h.Write("big.txt", new string('a', 2048));
 
-        var act = async () => await h.Ingester.IngestFileAsync(path, new IngestOptions { MaxFileSizeBytes = 1024 });
+        var act = async () => await h.IngestAsync(path, new IngestOptions { MaxFileSizeBytes = 1024 });
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*exceeding the limit*");
     }
@@ -221,80 +291,22 @@ public abstract class PipelineBehaviorTests : IDisposable
         using var h = await NewHarnessAsync();
         var path = h.Write("long.txt", new string('a', 500));
 
-        var act = async () => await h.Ingester.IngestFileAsync(path, new IngestOptions { MaxChunkCharacters = 100 });
+        var act = async () => await h.IngestAsync(path, new IngestOptions { MaxChunkCharacters = 100 });
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*chunk*");
     }
 
-    [SkippableFact]
-    public async Task IngestFolder_RejectsFoldersOverFileLimit()
-    {
-        using var h = await NewHarnessAsync();
-        h.Write("1.txt", "a");
-        h.Write("2.txt", "b");
-        h.Write("3.txt", "c");
-
-        var act = async () => await h.Ingester.IngestFolderAsync(h.ContentDir, new IngestOptions { MaxFiles = 2 });
-
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*exceeding the limit of 2*");
-    }
-
     [SkippableTheory]
-    [InlineData(0, 1, 1)]
-    [InlineData(1, 0, 1)]
-    [InlineData(1, 1, 0)]
-    public async Task IngestFile_RejectsInvalidOptions(long maxBytes, int maxFiles, int maxChunk)
+    [InlineData(0, 1)]
+    [InlineData(1, 0)]
+    public async Task IngestFile_RejectsInvalidOptions(long maxBytes, int maxChunk)
     {
         using var h = await NewHarnessAsync();
         var path = h.Write("a.txt", "x");
 
-        var act = async () => await h.Ingester.IngestFileAsync(path, new IngestOptions { MaxFileSizeBytes = maxBytes, MaxFiles = maxFiles, MaxChunkCharacters = maxChunk });
+        var act = async () => await h.IngestAsync(path, new IngestOptions { MaxFileSizeBytes = maxBytes, MaxChunkCharacters = maxChunk });
 
         await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
-    }
-
-    [SkippableFact]
-    public async Task IngestFolder_SkipsSymlinkedFilesAndDirectoriesByDefault()
-    {
-        using var h = await NewHarnessAsync();
-        h.Write("real.txt", "real content");
-        var outside = Path.Combine(h.Root, "outside");
-        Directory.CreateDirectory(outside);
-        File.WriteAllText(Path.Combine(outside, "secret.txt"), "secret content");
-        TryLink(() => File.CreateSymbolicLink(Path.Combine(h.ContentDir, "link.txt"), Path.Combine(outside, "secret.txt")));
-        TryLink(() => Directory.CreateSymbolicLink(Path.Combine(h.ContentDir, "linkdir"), outside));
-
-        var summary = await h.Ingester.IngestFolderAsync(h.ContentDir);
-
-        summary.Succeeded.Should().ContainSingle(s => s.FilePath.EndsWith("real.txt"));
-        (await h.Search.SearchAsync("secret", 10)).Should().NotContain(r => r.Content!.Contains("secret"));
-    }
-
-    [SkippableFact]
-    public async Task IngestFolder_FollowsSymlinks_WhenAllowed()
-    {
-        using var h = await NewHarnessAsync();
-        var outside = Path.Combine(h.Root, "outside");
-        Directory.CreateDirectory(outside);
-        File.WriteAllText(Path.Combine(outside, "secret.txt"), "secret content");
-        TryLink(() => File.CreateSymbolicLink(Path.Combine(h.ContentDir, "link.txt"), Path.Combine(outside, "secret.txt")));
-
-        var summary = await h.Ingester.IngestFolderAsync(h.ContentDir, new IngestOptions { AllowSymlinks = true });
-
-        summary.Succeeded.Should().ContainSingle(s => s.FilePath.EndsWith("link.txt"));
-    }
-
-    [SkippableFact]
-    public async Task IngestFile_RefusesSymlink_ByDefault()
-    {
-        using var h = await NewHarnessAsync();
-        var target = h.Write("target.txt", "content");
-        var link = Path.Combine(h.ContentDir, "link.txt");
-        TryLink(() => File.CreateSymbolicLink(link, target));
-
-        var act = async () => await h.Ingester.IngestFileAsync(link);
-
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*symbolic link*");
     }
 
     [SkippableFact]
@@ -303,18 +315,9 @@ public abstract class PipelineBehaviorTests : IDisposable
         using var h = await NewHarnessAsync();
         var path = h.Write("doc.pdf", "x");
 
-        var act = async () => await h.Ingester.IngestFileAsync(path);
+        var act = async () => await h.IngestAsync(path);
 
         await act.Should().ThrowAsync<NotSupportedException>();
-    }
-
-    private static void TryLink(Action create)
-    {
-        try { create(); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            throw new SkipException("Symbolic links are not available: " + ex.Message);
-        }
     }
 
     // ---- search ----
@@ -324,7 +327,7 @@ public abstract class PipelineBehaviorTests : IDisposable
     {
         using var h = await NewHarnessAsync();
         h.Write("corpus.txt", "alpha beta gamma\n\ndelta epsilon zeta\n\neta theta iota\n\nkappa lambda mu");
-        await h.Ingester.IngestFileAsync(Path.Combine(h.ContentDir, "corpus.txt"));
+        await h.IngestAsync(Path.Combine(h.ContentDir, "corpus.txt"));
 
         // The mock embeds identical text identically, so the chunk is also the nearest vector.
         var results = await h.Search.SearchAsync("alpha beta gamma", 4);
@@ -341,7 +344,7 @@ public abstract class PipelineBehaviorTests : IDisposable
     {
         using var h = await NewHarnessAsync();
         h.Write("a.txt", "completely different words");
-        await h.Ingester.IngestFileAsync(Path.Combine(h.ContentDir, "a.txt"));
+        await h.IngestAsync(Path.Combine(h.ContentDir, "a.txt"));
 
         var results = await h.Search.SearchAsync("zzzqqq", 5);
 
@@ -355,25 +358,29 @@ public abstract class PipelineBehaviorTests : IDisposable
     {
         using var h = await NewHarnessAsync();
         h.Write("a.txt", string.Join("\n\n", Enumerable.Range(1, 12).Select(i => $"token paragraph {i}")));
-        await h.Ingester.IngestFileAsync(Path.Combine(h.ContentDir, "a.txt"));
+        await h.IngestAsync(Path.Combine(h.ContentDir, "a.txt"));
 
         (await h.Search.SearchAsync("token", 3)).Should().HaveCount(3);
     }
 
     [SkippableFact]
-    public async Task Search_FiltersBySourceIds_OnBothSides()
+    public async Task Search_FiltersByDocumentIds_OnBothSides()
     {
         using var h = await NewHarnessAsync();
         h.Write("first.txt", "shared phrase one");
         h.Write("second.txt", "shared phrase two");
-        await h.Ingester.IngestFolderAsync(h.ContentDir);
+        var results = await h.IngestAllAsync();
+        var second = results.Single(r => r.FilePath == "second.txt");
 
-        var filtered = await h.Search.SearchAsync("shared phrase", 10, ["second"]);
+        var filtered = await h.Search.SearchAsync("shared phrase", 10, [second.DocumentId]);
 
         filtered.Should().ContainSingle();
-        filtered[0].SourceId.Should().Be("second");
+        filtered[0].DocumentId.Should().Be(second.DocumentId);
+        filtered[0].KeywordRank.Should().NotBeNull();
+        filtered[0].VectorRank.Should().NotBeNull();
         (await h.Search.SearchAsync("shared phrase", 10)).Should().HaveCount(2);
-        (await h.Search.SearchAsync("shared phrase", 10, ["nonexistent"])).Should().BeEmpty();
+        (await h.Search.SearchAsync("shared phrase", 10, [Guid.NewGuid()])).Should().BeEmpty();
+        (await h.Search.SearchAsync("shared phrase", 10, results.Select(r => r.DocumentId).ToList())).Should().HaveCount(2);
     }
 
     [SkippableFact]
@@ -389,7 +396,7 @@ public abstract class PipelineBehaviorTests : IDisposable
     {
         using var h = await NewHarnessAsync();
         h.Write("a.txt", "some text");
-        await h.Ingester.IngestFileAsync(Path.Combine(h.ContentDir, "a.txt"));
+        await h.IngestAsync(Path.Combine(h.ContentDir, "a.txt"));
 
         var act = async () => await h.Search.SearchAsync("field:\"unclosed AND (", 5);
 
@@ -422,26 +429,26 @@ public abstract class PipelineBehaviorTests : IDisposable
     }
 
     [SkippableFact]
-    public async Task Search_RejectsOverlongQuery_AndBadSourceIds()
+    public async Task Search_RejectsOverlongQuery_AndTooManyDocumentIds()
     {
         using var h = await NewHarnessAsync();
 
         var tooLong = async () => await h.Search.SearchAsync(new string('a', SearchService.MaxQueryLength + 1), 5);
-        var tooMany = async () => await h.Search.SearchAsync("q", 5, Enumerable.Range(0, SearchService.MaxSourceIds + 1).Select(i => "s" + i).ToList());
-        var blank = async () => await h.Search.SearchAsync("q", 5, [" "]);
-        var longId = async () => await h.Search.SearchAsync("q", 5, [new string('s', SearchService.MaxSourceIdLength + 1)]);
+        var tooMany = async () => await h.Search.SearchAsync("q", 5, Enumerable.Range(0, SearchService.MaxDocumentIds + 1).Select(_ => Guid.NewGuid()).ToList());
 
         await tooLong.Should().ThrowAsync<ArgumentOutOfRangeException>();
         await tooMany.Should().ThrowAsync<ArgumentOutOfRangeException>();
-        await blank.Should().ThrowAsync<ArgumentException>();
-        await longId.Should().ThrowAsync<ArgumentOutOfRangeException>();
     }
 }
 
 /// <summary>Unit-level run of the behaviour suite against the in-memory store.</summary>
 public class InMemoryPipelineTests : PipelineBehaviorTests
 {
-    protected override Task<IDocumentStore> CreateStoreAsync() => Task.FromResult<IDocumentStore>(new InMemoryDocumentStore());
+    protected override Task<StoreUnderTest> CreateStoreAsync()
+    {
+        var store = new InMemoryDocumentStore();
+        return Task.FromResult(new StoreUnderTest(store, path => Task.FromResult(store.CreateDocument(path))));
+    }
 
     [Fact]
     public async Task IngestFile_PersistsTitleHashAndModality()
@@ -449,37 +456,23 @@ public class InMemoryPipelineTests : PipelineBehaviorTests
         using var h = new PipelineHarness(new InMemoryDocumentStore());
         var path = h.Write("My Notes.txt", "hello");
 
-        var result = await h.Ingester.IngestFileAsync(path);
+        var result = await h.IngestAsync(path);
 
         var draft = ((InMemoryDocumentStore)h.Store).DraftOf(result.DocumentId)!;
         draft.Title.Should().Be("My Notes.txt");
-        draft.SourceId.Should().Be("My Notes");
         draft.ContentHash.Should().Be("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
         draft.Modality.Should().Be(Modality.Text);
     }
 
     [Fact]
-    public async Task IngestFile_EnsuresVectorIndexOnce()
+    public async Task Ingest_DoesNotCreateTheVectorIndex_TheWorkerDoesThatOncePerJob()
     {
         using var h = new PipelineHarness(new InMemoryDocumentStore());
         var store = (InMemoryDocumentStore)h.Store;
 
-        await h.Ingester.IngestFileAsync(h.Write("a.txt", "x"));
+        await h.IngestAsync(h.Write("a.txt", "x"));
 
-        store.EnsureVectorIndexCalls.Should().Be(1);
-    }
-
-    [Fact]
-    public async Task IngestFolder_EnsuresVectorIndexOncePerBatch()
-    {
-        using var h = new PipelineHarness(new InMemoryDocumentStore());
-        var store = (InMemoryDocumentStore)h.Store;
-        for (int i = 0; i < 5; i++) h.Write($"f{i}.txt", $"content {i}\n\nmore {i}");
-
-        await h.Ingester.IngestFolderAsync(h.ContentDir);
-
-        store.ReplaceCalls.Should().Be(5);
-        store.EnsureVectorIndexCalls.Should().Be(1);
+        store.EnsureVectorIndexCalls.Should().Be(0);
     }
 
     [Fact]
@@ -489,10 +482,10 @@ public class InMemoryPipelineTests : PipelineBehaviorTests
         using var h = new PipelineHarness(store, new FailingLuceneRepository());
         var path = h.Write("a.txt", "content");
 
-        var act = async () => await h.Ingester.IngestFileAsync(path);
+        var act = async () => await h.IngestAsync(path);
 
         await act.Should().ThrowAsync<IOException>();
-        store.StatusOf(DocumentIds.FromSourcePath(path)).Should().Be(IndexStatus.Failed);
+        store.StatusOf(store.AllDocumentIds.Single()).Should().Be(IndexStatus.Failed);
     }
 
     [Fact]
@@ -502,7 +495,7 @@ public class InMemoryPipelineTests : PipelineBehaviorTests
         var store = new InMemoryDocumentStore();
         using var h = new PipelineHarness(store, new FailingLuceneRepository());
 
-        var result = await h.Ingester.IngestFileAsync(h.WriteBytes("p.png", [1, 2, 3]));
+        var result = await h.IngestAsync(h.WriteBytes("p.png", [1, 2, 3]));
 
         result.ChunkCount.Should().Be(1);
         store.StatusOf(result.DocumentId).Should().Be(IndexStatus.Indexed);
@@ -514,7 +507,7 @@ public class InMemoryPipelineTests : PipelineBehaviorTests
         var store = new InMemoryDocumentStore();
         using var h = new PipelineHarness(store);
         var path = h.Write("a.txt", "orphan words");
-        await h.Ingester.IngestFileAsync(path);
+        await h.IngestAsync(path);
 
         // Re-ingest into a fresh store while keeping the old Lucene index: ids no longer resolve.
         using var h2 = new PipelineHarness(new InMemoryDocumentStore());

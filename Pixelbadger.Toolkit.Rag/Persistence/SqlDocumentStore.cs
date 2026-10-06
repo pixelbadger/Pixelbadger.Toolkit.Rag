@@ -117,6 +117,7 @@ public sealed class SqlDocumentStore : IDocumentStore
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<ChunkRecord>> ReplaceDocumentAsync(
+        Guid documentId,
         DocumentDraft document,
         IReadOnlyList<ChunkDraft> chunks,
         CancellationToken cancellationToken = default)
@@ -130,7 +131,20 @@ public sealed class SqlDocumentStore : IDocumentStore
                     $"Chunk {chunk.Ordinal} embedding must have {RagDbContext.EmbeddingDimensions} dimensions.", nameof(chunks));
         }
 
-        // A pre-v3 vector index makes the table read-only: drop it up front (it is recreated by EnsureVectorIndexAsync).
+        return await WriteAsync(ct => ReplaceCoreAsync(documentId, document, chunks, ct), cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> DeleteDocumentAsync(Guid documentId, CancellationToken cancellationToken = default)
+        => await WriteAsync(ct => DeleteCoreAsync(documentId, ct), cancellationToken);
+
+    /// <summary>
+    /// Runs a write against the chunk table. A pre-v3 vector index makes the table read-only (inserts and deletes
+    /// alike), so it is dropped up front (recreated by <see cref="EnsureVectorIndexAsync"/>) and, should one appear
+    /// concurrently, dropped on the read-only error and the write retried once.
+    /// </summary>
+    private async Task<T> WriteAsync<T>(Func<CancellationToken, Task<T>> write, CancellationToken cancellationToken)
+    {
         if (_indexState is not { Kind: not VectorIndexKind.Legacy })
         {
             var state = await DetectIndexStateAsync(cancellationToken);
@@ -140,22 +154,36 @@ public sealed class SqlDocumentStore : IDocumentStore
 
         try
         {
-            return await ReplaceCoreAsync(document, chunks, cancellationToken);
+            return await write(cancellationToken);
         }
         catch (SqlException ex) when (HasError(ex, VectorIndexReadOnlyError) || ex.InnerException is SqlException { Number: VectorIndexReadOnlyError })
         {
             // Index appeared concurrently (or detection was stale): drop it and retry once.
             await DropVectorIndexAsync(cancellationToken);
-            return await ReplaceCoreAsync(document, chunks, cancellationToken);
+            return await write(cancellationToken);
         }
         catch (DbUpdateException ex) when (ex.GetBaseException() is SqlException sql && HasError(sql, VectorIndexReadOnlyError))
         {
             await DropVectorIndexAsync(cancellationToken);
-            return await ReplaceCoreAsync(document, chunks, cancellationToken);
+            return await write(cancellationToken);
         }
     }
 
+    private async Task<bool> DeleteCoreAsync(Guid documentId, CancellationToken cancellationToken)
+    {
+        await using var db = CreateContext();
+        await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
+
+        // Jobs first, then the document (which cascades to chunks): the ingest queue's claim locks a job row and then
+        // updates its document, so taking the locks in the same order avoids a deadlock with a concurrent claim.
+        await db.IngestJobs.Where(j => j.Document!.GlobalId == documentId).ExecuteDeleteAsync(cancellationToken);
+        var deleted = await db.Documents.Where(d => d.GlobalId == documentId).ExecuteDeleteAsync(cancellationToken);
+        await tx.CommitAsync(cancellationToken);
+        return deleted > 0;
+    }
+
     private async Task<IReadOnlyList<ChunkRecord>> ReplaceCoreAsync(
+        Guid documentId,
         DocumentDraft draft,
         IReadOnlyList<ChunkDraft> chunkDrafts,
         CancellationToken cancellationToken)
@@ -163,25 +191,20 @@ public sealed class SqlDocumentStore : IDocumentStore
         await using var db = CreateContext();
         await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
 
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.GlobalId == draft.GlobalId, cancellationToken);
-        if (doc is null)
-        {
-            doc = new Document { GlobalId = draft.GlobalId };
-            db.Documents.Add(doc);
-        }
-        else
-        {
-            await db.Chunks.Where(c => c.DocumentId == doc.DocumentId).ExecuteDeleteAsync(cancellationToken);
-        }
+        // The document must exist: it is created when the upload is accepted, so a missing row means it was deleted
+        // while its job ran, and writing chunks now would resurrect it.
+        var doc = await db.Documents.FirstOrDefaultAsync(d => d.GlobalId == documentId, cancellationToken)
+            ?? throw new DocumentNotFoundException(documentId);
+
+        await db.Chunks.Where(c => c.DocumentId == doc.DocumentId).ExecuteDeleteAsync(cancellationToken);
 
         doc.SourcePath = draft.SourcePath;
-        doc.SourceId = draft.SourceId;
         doc.Title = draft.Title;
         doc.Modality = draft.Modality;
         doc.ContentHash = draft.ContentHash;
         doc.IndexStatus = IndexStatus.Indexed;
         doc.UpdatedAtUtc = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken); // document row keeps its DocumentId on re-ingest
+        await db.SaveChangesAsync(cancellationToken);
 
         var entities = new List<Chunk>(chunkDrafts.Count);
         foreach (var c in chunkDrafts.OrderBy(c => c.Ordinal))
@@ -206,7 +229,7 @@ public sealed class SqlDocumentStore : IDocumentStore
 
         return entities
             .Select(c => new ChunkRecord(
-                c.ChunkId, c.GlobalId, doc.DocumentId, doc.GlobalId, doc.SourcePath, doc.SourceId, doc.Title,
+                c.ChunkId, c.GlobalId, doc.DocumentId, doc.GlobalId, doc.SourcePath, doc.Title,
                 c.Ordinal, c.Modality, c.LocatorStart, c.LocatorEnd, c.ChunkText))
             .ToList();
     }
@@ -215,13 +238,13 @@ public sealed class SqlDocumentStore : IDocumentStore
     private const string EmbeddingModelId = "embeddinggemma-2@256";
 
     /// <inheritdoc />
-    /// <remarks>A no-op when no document has the given GlobalId.</remarks>
-    public async Task SetIndexStatusAsync(string documentGlobalId, IndexStatus status, CancellationToken cancellationToken = default)
+    /// <remarks>A no-op when no document has the given id.</remarks>
+    public async Task SetIndexStatusAsync(Guid documentId, IndexStatus status, CancellationToken cancellationToken = default)
     {
         await using var db = CreateContext();
         var updatedAt = DateTime.UtcNow;
         await db.Documents
-            .Where(d => d.GlobalId == documentGlobalId)
+            .Where(d => d.GlobalId == documentId)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(d => d.IndexStatus, status)
                 .SetProperty(d => d.UpdatedAtUtc, updatedAt), cancellationToken);
@@ -240,7 +263,7 @@ public sealed class SqlDocumentStore : IDocumentStore
             .AsNoTracking()
             .Where(c => ids.Contains(c.ChunkId))
             .Select(c => new ChunkRecord(
-                c.ChunkId, c.GlobalId, c.DocumentId, c.Document!.GlobalId, c.Document.SourcePath, c.Document.SourceId,
+                c.ChunkId, c.GlobalId, c.DocumentId, c.Document!.GlobalId, c.Document.SourcePath,
                 c.Document.Title, c.Ordinal, c.Modality, c.LocatorStart, c.LocatorEnd, c.ChunkText))
             .ToListAsync(cancellationToken);
     }
@@ -249,7 +272,7 @@ public sealed class SqlDocumentStore : IDocumentStore
     public async Task<IReadOnlyList<VectorHit>> SearchAsync(
         float[] queryEmbedding,
         int maxResults,
-        IReadOnlyCollection<string>? sourceIds,
+        IReadOnlyCollection<Guid>? documentIds,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(queryEmbedding);
@@ -257,7 +280,7 @@ public sealed class SqlDocumentStore : IDocumentStore
             throw new ArgumentException($"Query embedding must have {RagDbContext.EmbeddingDimensions} dimensions.", nameof(queryEmbedding));
         if (maxResults <= 0) return Array.Empty<VectorHit>();
 
-        var filter = sourceIds is { Count: > 0 } ? sourceIds.Distinct().ToArray() : null;
+        var filter = documentIds is { Count: > 0 } ? documentIds.Distinct().ToArray() : null;
         var vector = new SqlVector<float>(queryEmbedding);
 
         await using var conn = CreateConnection();
@@ -282,7 +305,7 @@ public sealed class SqlDocumentStore : IDocumentStore
         VectorIndexState state,
         SqlVector<float> vector,
         int maxResults,
-        string[]? filter,
+        Guid[]? filter,
         CancellationToken ct)
     {
         // Preferred (v3+): TOP (n) WITH APPROXIMATE, where filters are applied during the search.
@@ -332,7 +355,7 @@ public sealed class SqlDocumentStore : IDocumentStore
     }
 
     private static async Task<IReadOnlyList<VectorHit>> RunApproximateAsync(
-        SqlConnection conn, SqlVector<float> vector, int maxResults, string[]? filter, bool withApproximate, int candidates, CancellationToken ct)
+        SqlConnection conn, SqlVector<float> vector, int maxResults, Guid[]? filter, bool withApproximate, int candidates, CancellationToken ct)
     {
         var sql = new StringBuilder();
         if (withApproximate)
@@ -360,7 +383,7 @@ public sealed class SqlDocumentStore : IDocumentStore
     }
 
     private static async Task<IReadOnlyList<VectorHit>> ExactSearchAsync(
-        SqlConnection conn, SqlVector<float> vector, int maxResults, string[]? filter, CancellationToken ct)
+        SqlConnection conn, SqlVector<float> vector, int maxResults, Guid[]? filter, CancellationToken ct)
     {
         var sql = new StringBuilder("SELECT TOP (@k) c.ChunkId, VECTOR_DISTANCE('cosine', c.Embedding, @q) AS distance FROM ")
             .Append(ChunksTableSql).Append(" AS c");
@@ -373,15 +396,15 @@ public sealed class SqlDocumentStore : IDocumentStore
         return await ReadHitsAsync(cmd, ct);
     }
 
-    private static void AppendFilter(StringBuilder sql, SqlCommand cmd, string[]? filter)
+    private static void AppendFilter(StringBuilder sql, SqlCommand cmd, Guid[]? filter)
     {
         if (filter is null) return;
-        sql.Append(" JOIN dbo.").Append(RagDbContext.DocumentsTable).Append(" AS d ON d.DocumentId = c.DocumentId WHERE d.SourceId IN (");
+        sql.Append(" JOIN dbo.").Append(RagDbContext.DocumentsTable).Append(" AS d ON d.DocumentId = c.DocumentId WHERE d.GlobalId IN (");
         for (int i = 0; i < filter.Length; i++)
         {
             if (i > 0) sql.Append(", ");
             sql.Append("@s").Append(i);
-            cmd.Parameters.Add(new SqlParameter("@s" + i, SqlDbType.NVarChar, 256) { Value = filter[i] });
+            cmd.Parameters.Add(new SqlParameter("@s" + i, SqlDbType.UniqueIdentifier) { Value = filter[i] });
         }
 
         sql.Append(')');

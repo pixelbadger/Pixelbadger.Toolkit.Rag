@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Pixelbadger.Toolkit.Rag.Domain;
 
 namespace Pixelbadger.Toolkit.Rag.Persistence;
@@ -13,6 +14,7 @@ public sealed class RagDbContext : DbContext
 {
     public const string DocumentsTable = "Documents";
     public const string ChunksTable = "Chunks_EG2_256";
+    public const string IngestJobsTable = "IngestJobs";
     public const int EmbeddingDimensions = 256;
 
     public RagDbContext(DbContextOptions<RagDbContext> options) : base(options)
@@ -23,17 +25,24 @@ public sealed class RagDbContext : DbContext
 
     public DbSet<Chunk> Chunks => Set<Chunk>();
 
+    public DbSet<IngestJob> IngestJobs => Set<IngestJob>();
+
+    private static readonly ValueConverter<DateTime, DateTime> UtcConverter =
+        new(v => v, v => DateTime.SpecifyKind(v, DateTimeKind.Utc));
+
+    private static readonly ValueConverter<DateTime?, DateTime?> NullableUtcConverter =
+        new(v => v, v => v.HasValue ? DateTime.SpecifyKind(v.Value, DateTimeKind.Utc) : v);
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Document>(e =>
         {
             e.ToTable(DocumentsTable);
             e.HasKey(d => d.DocumentId);
-            e.Property(d => d.GlobalId).HasColumnType("nvarchar(64)").IsRequired();
+            // Assigned in code (Guid v7) when the document is created, so the id can be returned before any work is done.
+            e.Property(d => d.GlobalId).ValueGeneratedNever();
             e.HasIndex(d => d.GlobalId).IsUnique();
             e.Property(d => d.SourcePath).HasColumnType("nvarchar(max)").IsRequired();
-            e.Property(d => d.SourceId).HasColumnType("nvarchar(256)").IsRequired();
-            e.HasIndex(d => d.SourceId);
             e.Property(d => d.Title).HasColumnType("nvarchar(1000)");
             e.Property(d => d.Modality).HasConversion<byte>().HasColumnType("tinyint");
             e.Property(d => d.ContentHash).HasColumnType("char(64)").IsRequired();
@@ -63,6 +72,30 @@ public sealed class RagDbContext : DbContext
             e.Property(c => c.ChunkText).HasColumnType("nvarchar(max)");
             e.Property(c => c.EmbeddingModel).HasColumnType("nvarchar(64)").IsRequired();
             e.Property(c => c.Embedding).HasColumnType($"vector({EmbeddingDimensions})").IsRequired();
+        });
+
+        modelBuilder.Entity<IngestJob>(e =>
+        {
+            e.ToTable(IngestJobsTable);
+            e.HasKey(j => j.Id);
+            // Assigned in code (Guid v7), like chunk ids.
+            e.Property(j => j.Id).ValueGeneratedNever();
+            e.HasOne(j => j.Document)
+                .WithMany(d => d.Jobs)
+                .HasForeignKey(j => j.DocumentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            e.Property(j => j.Status).HasConversion<int>();
+            e.Property(j => j.LogicalPath).HasColumnType("nvarchar(1024)").IsRequired();
+            // Nullable: cleared once the job is terminal.
+            e.Property(j => j.Content).HasColumnType("varbinary(max)");
+            e.Property(j => j.Error).HasColumnType("nvarchar(max)");
+            e.Property(j => j.CreatedAtUtc).HasColumnType("datetime2").HasConversion(UtcConverter);
+            e.Property(j => j.StartedAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
+            e.Property(j => j.CompletedAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
+            e.Property(j => j.LeaseExpiresAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
+            e.Property(j => j.LeaseOwner).HasColumnType("nvarchar(128)");
+            e.HasIndex(j => new { j.Status, j.CreatedAtUtc }).HasDatabaseName("IX_IngestJobs_Status_CreatedAtUtc");
+            e.HasIndex(j => new { j.DocumentId, j.CreatedAtUtc }).HasDatabaseName("IX_IngestJobs_Document_CreatedAtUtc");
         });
     }
 }

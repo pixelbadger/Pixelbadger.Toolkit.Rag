@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Golden fixture generator for the EmbeddingGemma 2 C# port (reference doc section 9).
+// Golden fixture generator for the EmbeddingGemma 2 C# port.
 //
 // transformers.js runs the reference processor + the SAME ONNX files, so its tensors are the oracle for every
 // [verify] item (patch order, position-id order, mel scale, clip segmentation, placeholder framing, ...).
@@ -230,7 +230,7 @@ async function embeddingOf(inputs) {
   return out.sentence_embedding; // [batch, 768], L2-normalised, full width: the C# side truncates to 256 + re-normalises
 }
 
-// ---- text: queries use the search prompt, documents the title/text prompt (reference section 5) ----------------------------------
+// ---- text: queries use the search prompt, documents the title/text prompt ----------------------------------
 const queries = [
   "Which planet is known as the Red Planet?",
   "northern lights",
@@ -260,7 +260,7 @@ dumpProcessorOutputs("txt", txtInputs);
 dump("txt", "embedding", await embeddingOf(txtInputs));
 
 // ---- image -------------------------------------------------------------------------------------------------------------------------------
-// [verify] The processor call signature for multimodal input follows the reference doc (text, image, audio).
+// [verify] The processor call signature for multimodal input is (text, image, audio).
 for (const [name, file] of [["img-square", files.imgSquare], ["img-wide", files.imgWide]]) {
   console.log(name);
   const image = await load_image(file);

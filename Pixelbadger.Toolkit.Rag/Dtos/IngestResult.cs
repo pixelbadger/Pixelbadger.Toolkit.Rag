@@ -2,8 +2,11 @@ using Pixelbadger.Toolkit.Rag.Domain;
 
 namespace Pixelbadger.Toolkit.Rag.Dtos;
 
-public sealed record IngestResult(string FilePath, string DocumentId, Modality Modality, int ChunkCount);
+/// <summary>
+/// A file to ingest: the bytes on local disk (any path, typically a temp file that keeps the original
+/// extension), the logical path (metadata only) and the id of the existing document the chunks belong to.
+/// </summary>
+public sealed record IngestSource(string LocalPath, string LogicalPath, Guid DocumentId);
 
-public sealed record IngestFailure(string FilePath, string Error);
-
-public sealed record IngestSummary(IReadOnlyList<IngestResult> Succeeded, IReadOnlyList<IngestFailure> Failed, int Skipped);
+/// <param name="FilePath">The logical path of the ingested file.</param>
+public sealed record IngestResult(string FilePath, Guid DocumentId, Modality Modality, int ChunkCount);
