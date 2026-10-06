@@ -2,9 +2,9 @@ using System.ComponentModel;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
-using Pixelbadger.Toolkit.Rag.Commands;
+using Pixelbadger.Toolkit.Rag.Components;
 
-namespace Pixelbadger.Toolkit.Rag.Components;
+namespace Pixelbadger.Toolkit.Rag.Mcp;
 
 /// <summary>
 /// MCP tool surface. Instances are created per call by the MCP host's DI container, so the search

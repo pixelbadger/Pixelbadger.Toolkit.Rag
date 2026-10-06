@@ -1,5 +1,7 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Domain;
+using Pixelbadger.Toolkit.Rag.Dtos;
 using Pixelbadger.Toolkit.Rag.Embeddings.Audio;
 using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
 using Pixelbadger.Toolkit.Rag.Persistence;
@@ -184,8 +186,24 @@ public sealed class PipelineHarness : IDisposable
         Ingester = new ContentIngester(
             Options, Store, lucene, embeddings,
             new ChunkerFactory(chunkers), new Components.FileReaders.FileReaderFactory(readers),
-            new FakeImagePreprocessor(), Audio);
+            new FakeImagePreprocessor(), Audio, NullLogger<ContentIngester>.Instance);
         Search = new SearchService(Options, lucene, Store, embeddings, new RrfReranker());
+    }
+
+    /// <summary>The logical path of a file under <see cref="ContentDir"/>: its relative path with '/' separators.</summary>
+    public string LogicalPathOf(string localPath) => Path.GetRelativePath(ContentDir, localPath).Replace('\\', '/');
+
+    /// <summary>Ingests a file under <see cref="ContentDir"/> using its relative path as the logical path.</summary>
+    public Task<IngestResult> IngestAsync(string localPath, IngestOptions? options = null)
+        => Ingester.IngestAsync(new IngestSource(localPath, LogicalPathOf(localPath)), options);
+
+    /// <summary>Ingests every file under <see cref="ContentDir"/> (all must be supported).</summary>
+    public async Task<IReadOnlyList<IngestResult>> IngestAllAsync()
+    {
+        var results = new List<IngestResult>();
+        foreach (var path in Directory.EnumerateFiles(ContentDir, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+            results.Add(await IngestAsync(path));
+        return results;
     }
 
     public string Write(string relativePath, string content)

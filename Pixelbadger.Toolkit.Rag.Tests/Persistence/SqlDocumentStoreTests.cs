@@ -23,7 +23,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     private static DocumentDraft Doc(string name, Modality modality = Modality.Text, string? hash = null)
     {
         var path = "/data/" + name + ".txt";
-        return new DocumentDraft(DocumentIds.FromSourcePath(path), path, name, name + ".txt", modality, hash ?? new string('a', 64));
+        return new DocumentDraft(DocumentIds.FromLogicalPath(path), path, name, name + ".txt", modality, hash ?? new string('a', 64));
     }
 
     private static ChunkDraft Chunk(int ordinal, string seed, string? text = null)

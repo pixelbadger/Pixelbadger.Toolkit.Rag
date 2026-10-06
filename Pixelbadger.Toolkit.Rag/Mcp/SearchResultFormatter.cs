@@ -2,9 +2,9 @@ using System.Text;
 using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Dtos;
 
-namespace Pixelbadger.Toolkit.Rag.Commands;
+namespace Pixelbadger.Toolkit.Rag.Mcp;
 
-/// <summary>Text rendering of hybrid search results for the CLI and the MCP tool.</summary>
+/// <summary>Text rendering of hybrid search results for the MCP tool.</summary>
 public static class SearchResultFormatter
 {
     private const string Separator = "------------------------------------------------------------";
@@ -33,33 +33,6 @@ public static class SearchResultFormatter
             : "[audio]",
         _ => null
     };
-
-    /// <summary>Output for <c>pbrag query</c>.</summary>
-    public static string FormatForCli(IReadOnlyList<SearchResult> results)
-    {
-        if (results.Count == 0)
-            return "No results found.";
-
-        var sb = new StringBuilder();
-        sb.AppendLine($"Found {results.Count} result(s) using hybrid search:");
-        sb.AppendLine();
-
-        for (var i = 0; i < results.Count; i++)
-        {
-            var r = results[i];
-            sb.AppendLine($"Result {i + 1} (Score: {r.Score:F4})");
-            sb.AppendLine($"Chunk ID: {r.ChunkId}");
-            sb.AppendLine($"Document ID: {r.DocumentId}");
-            sb.AppendLine($"Source: {r.SourceFile} (chunk {r.Ordinal})");
-            sb.AppendLine($"Modality: {r.Modality}");
-            sb.AppendLine($"Locator: {FormatLocator(r)}");
-            sb.AppendLine($"Content: {FormatMediaMarker(r) ?? r.Content}");
-            if (i < results.Count - 1)
-                sb.AppendLine(Separator);
-        }
-
-        return sb.ToString().TrimEnd();
-    }
 
     /// <summary>Output for the MCP <c>Search</c> tool. Content is framed as untrusted data.</summary>
     public static string FormatForMcp(IReadOnlyList<SearchResult> results)

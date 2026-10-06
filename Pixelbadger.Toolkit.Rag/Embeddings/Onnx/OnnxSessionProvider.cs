@@ -1,4 +1,5 @@
 using Microsoft.ML.OnnxRuntime;
+using SessionOptions = Microsoft.ML.OnnxRuntime.SessionOptions;
 
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 

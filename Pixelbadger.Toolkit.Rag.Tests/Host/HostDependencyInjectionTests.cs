@@ -1,33 +1,33 @@
 using FluentAssertions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
 using Pixelbadger.Toolkit.Rag.Embeddings;
 using Pixelbadger.Toolkit.Rag.Embeddings.Audio;
 using Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
+using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Mcp;
 using Pixelbadger.Toolkit.Rag.Persistence;
+using Pixelbadger.Toolkit.Rag.Tests.Support;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Host;
 
+/// <summary>
+/// Builds the real web host (Program) against a nonexistent SQL Server and an empty model directory: constructors
+/// must be lazy (no model load, no DB connection). The factory enables scope and build validation.
+/// </summary>
 public class HostDependencyInjectionTests
 {
-    // Deliberately points at nothing: constructors must be lazy (no model load, no DB connection).
-    private static RagOptions NonexistentResources() => new()
-    {
-        IndexPath = Path.Combine(Path.GetTempPath(), "pbrag-does-not-exist"),
-        Sql = new SqlStoreOptions { ConnectionString = "Server=nonexistent.invalid;Database=x;Connect Timeout=1" },
-        Model = new EmbeddingModelOptions { ModelPath = Path.Combine(Path.GetTempPath(), "pbrag-no-model") }
-    };
-
-    private static ServiceProvider Build() =>
-        new ServiceCollection().AddRagServices(NonexistentResources())
-            .BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
+    private static RagWebApplicationFactory NewFactory() => new() { UseRealServices = true };
 
     [Fact]
     public void GraphValidatesOnBuild()
     {
-        var act = () => Build();
+        using var factory = NewFactory();
+
+        var act = () => factory.Services;
 
         act.Should().NotThrow();
     }
@@ -46,63 +46,102 @@ public class HostDependencyInjectionTests
     [InlineData(typeof(OnnxSessionProvider))]
     [InlineData(typeof(ChunkerFactory))]
     [InlineData(typeof(FileReaderFactory))]
+    [InlineData(typeof(IIngestQueue))]
+    [InlineData(typeof(IngestRequestValidator))]
+    [InlineData(typeof(IngestWorkerSignal))]
     [InlineData(typeof(RagOptions))]
     [InlineData(typeof(SqlStoreOptions))]
     [InlineData(typeof(EmbeddingModelOptions))]
+    [InlineData(typeof(IngestSettings))]
     public void EveryContractResolvesWithoutModelOrDatabase(Type serviceType)
     {
-        using var provider = Build();
+        using var factory = NewFactory();
 
-        provider.GetRequiredService(serviceType).Should().NotBeNull();
+        factory.Services.GetRequiredService(serviceType).Should().NotBeNull();
     }
 
     [Fact]
     public void EveryRegisteredDescriptorConstructs()
     {
-        var services = new ServiceCollection().AddRagServices(NonexistentResources());
-        using var provider = services.BuildServiceProvider();
+        using var factory = NewFactory();
+        _ = factory.Services; // build the host
 
-        // Our own registrations only (AddLogging adds open generics that can't be resolved by type alone).
-        foreach (var descriptor in services.Where(d => d.ServiceType.Namespace?.StartsWith("Pixelbadger") == true))
-            provider.GetServices(descriptor.ServiceType).Should().NotBeEmpty($"{descriptor.ServiceType} should resolve");
+        // Our own registrations only (the framework's are exercised by the host itself).
+        var ours = factory.ServiceDescriptors!
+            .Where(d => d.ServiceType.Namespace?.StartsWith("Pixelbadger") == true)
+            .ToList();
+        ours.Should().NotBeEmpty();
+        foreach (var descriptor in ours)
+            factory.Services.GetServices(descriptor.ServiceType).Should().NotBeEmpty($"{descriptor.ServiceType} should resolve");
+    }
+
+    [Theory]
+    [InlineData(typeof(DatabaseMigrationHostedService))]
+    [InlineData(typeof(IngestWorker))]
+    public void HostedServicesConstructWithoutTouchingTheDatabase(Type hostedType)
+    {
+        using var factory = NewFactory();
+
+        var instance = ActivatorUtilities.CreateInstance(factory.Services, hostedType);
+
+        instance.Should().BeAssignableTo<IHostedService>();
+    }
+
+    [Fact]
+    public void HostedServices_AreRegisteredMigrationsBeforeWorker()
+    {
+        // Hosted services start in registration order: migrations must precede the worker's first poll.
+        using var factory = new RagWebApplicationFactory { UseRealServices = true, KeepHostedServices = true };
+        _ = factory.Services;
+
+        var hosted = factory.ServiceDescriptors!
+            .Where(d => d.ServiceType == typeof(IHostedService))
+            .Select(d => d.ImplementationType)
+            .ToList();
+
+        hosted.Should().ContainInOrder(typeof(DatabaseMigrationHostedService), typeof(IngestWorker));
     }
 
     [Fact]
     public void OptionsAreSharedWithComponents()
     {
-        var options = NonexistentResources();
-        using var provider = new ServiceCollection().AddRagServices(options).BuildServiceProvider();
+        using var factory = NewFactory();
+        var options = factory.Services.GetRequiredService<RagOptions>();
 
-        provider.GetRequiredService<RagOptions>().Should().BeSameAs(options);
-        provider.GetRequiredService<SqlStoreOptions>().Should().BeSameAs(options.Sql);
-        provider.GetRequiredService<EmbeddingModelOptions>().Should().BeSameAs(options.Model);
+        factory.Services.GetRequiredService<SqlStoreOptions>().Should().BeSameAs(options.Sql);
+        factory.Services.GetRequiredService<EmbeddingModelOptions>().Should().BeSameAs(options.Model);
+        factory.Services.GetRequiredService<IngestSettings>().Should().BeSameAs(options.Ingest);
+        options.Model.ModelPath.Should().Be(factory.ModelDirectory);
     }
 
     [Fact]
     public void ExpensiveResourcesAreSingletons_StatelessServicesAreTransient()
     {
-        using var provider = Build();
+        using var factory = NewFactory();
+        var sp = factory.Services;
 
-        provider.GetRequiredService<IEmbeddingService>().Should().BeSameAs(provider.GetRequiredService<IEmbeddingService>());
-        provider.GetRequiredService<OnnxSessionProvider>().Should().BeSameAs(provider.GetRequiredService<OnnxSessionProvider>());
-        provider.GetRequiredService<ISearchService>().Should().NotBeSameAs(provider.GetRequiredService<ISearchService>());
+        sp.GetRequiredService<IEmbeddingService>().Should().BeSameAs(sp.GetRequiredService<IEmbeddingService>());
+        sp.GetRequiredService<OnnxSessionProvider>().Should().BeSameAs(sp.GetRequiredService<OnnxSessionProvider>());
+        sp.GetRequiredService<IngestWorkerSignal>().Should().BeSameAs(sp.GetRequiredService<IngestWorkerSignal>());
+        sp.GetRequiredService<ISearchService>().Should().NotBeSameAs(sp.GetRequiredService<ISearchService>());
+        sp.GetRequiredService<IIngestQueue>().Should().NotBeSameAs(sp.GetRequiredService<IIngestQueue>());
     }
 
     [Fact]
     public void ChunkersAndReadersAreAllRegistered()
     {
-        using var provider = Build();
+        using var factory = NewFactory();
 
-        provider.GetServices<ITextChunker>().Should().HaveCount(2);
-        provider.GetServices<IFileReader>().Should().HaveCount(2);
+        factory.Services.GetServices<ITextChunker>().Should().HaveCount(2);
+        factory.Services.GetServices<IFileReader>().Should().HaveCount(2);
     }
 
     [Fact]
     public void McpToolType_ResolvesFromTheSameGraph()
     {
-        using var provider = Build();
+        using var factory = NewFactory();
 
-        var tool = ActivatorUtilities.CreateInstance<McpRagServer>(provider);
+        var tool = ActivatorUtilities.CreateInstance<McpRagServer>(factory.Services);
 
         tool.Should().NotBeNull();
     }

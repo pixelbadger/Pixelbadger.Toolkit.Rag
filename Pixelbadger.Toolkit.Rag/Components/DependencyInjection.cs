@@ -5,6 +5,7 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Audio;
 using Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 using Pixelbadger.Toolkit.Rag.Embeddings.Text;
 using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
+using Pixelbadger.Toolkit.Rag.Ingestion;
 using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
@@ -19,6 +20,7 @@ public static class DependencyInjection
         services.AddSingleton(options);
         services.AddSingleton(options.Sql);
         services.AddSingleton(options.Model);
+        services.AddSingleton(options.Ingest);
 
         // Embeddings (expensive resources → singletons)
         services.AddSingleton<OnnxSessionProvider>();
@@ -31,6 +33,11 @@ public static class DependencyInjection
         // Persistence
         services.AddTransient<IDocumentStore, SqlDocumentStore>();
         services.AddTransient<ILuceneRepository, LuceneRepository>();
+
+        // Ingest queue (SQL) + request validation
+        services.AddTransient<IIngestQueue, SqlIngestQueue>();
+        services.AddTransient<IngestRequestValidator>();
+        services.AddSingleton<IngestWorkerSignal>();
 
         // Chunking / reading
         services.AddTransient<ITextChunker, MarkdownTextChunker>();
@@ -45,6 +52,17 @@ public static class DependencyInjection
         services.AddTransient<IContentIngester, ContentIngester>();
         services.AddTransient<ISearchService, SearchService>();
 
+        return services;
+    }
+
+    /// <summary>
+    /// Registers the background pieces of the web host. Order matters: hosted services start in registration
+    /// order, so migrations run before the worker starts polling.
+    /// </summary>
+    public static IServiceCollection AddRagHostedServices(this IServiceCollection services)
+    {
+        services.AddHostedService<DatabaseMigrationHostedService>();
+        services.AddHostedService<IngestWorker>();
         return services;
     }
 }

@@ -2,12 +2,12 @@ using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Protocol;
 using Moq;
-using Pixelbadger.Toolkit.Rag.Commands;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Dtos;
+using Pixelbadger.Toolkit.Rag.Mcp;
 
-namespace Pixelbadger.Toolkit.Rag.Tests.Host;
+namespace Pixelbadger.Toolkit.Rag.Tests.Mcp;
 
 public class McpOutputTests
 {
@@ -65,21 +65,6 @@ public class McpOutputTests
     {
         SearchResultFormatter.FormatForMcp([]).Should().Be("No relevant documents found for the query.");
     }
-
-    [Fact]
-    public void Cli_ListsRankScoreIdsSourceModalityLocatorAndContent()
-    {
-        var text = SearchResultFormatter.FormatForCli([Text(), Image(), Audio()]);
-
-        text.Should().Contain("Found 3 result(s) using hybrid search");
-        text.Should().Contain("Result 1 (Score: 0.0328)").And.Contain("Result 2 (Score: 0.0200)").And.Contain("Result 3 (Score: 0.0100)");
-        text.Should().Contain("Chunk ID: 22222222-2222-2222-2222-222222222222").And.Contain("Document ID: doc_aud");
-        text.Should().Contain("Modality: Image").And.Contain("Modality: Audio");
-        text.Should().Contain("Content: Mars is red.").And.Contain("Content: [image]").And.Contain("Content: [audio 00:30–01:05]");
-    }
-
-    [Fact]
-    public void Cli_Empty() => SearchResultFormatter.FormatForCli([]).Should().Be("No results found.");
 
     [Theory]
     [InlineData(0, "00:00")]
