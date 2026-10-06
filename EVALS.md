@@ -1,6 +1,6 @@
 # PBRAG Search Mode Evaluation
 
-> **Historical note (pre-2.0).** This document measures version 1.x, which used OpenAI `text-embedding-3` embeddings, SQLite-vec and selectable `bm25` / `vector` / `hybrid` modes (`--search-mode`). Version 2.0 is hybrid-only with local EmbeddingGemma 2 embeddings and SQL Server vector storage, so the costs, latencies and CLI flags below no longer apply. It is kept for context only.
+> **Historical note (pre-2.0).** This document measures version 1.x (the `pbrag` CLI, removed in 3.0), which used OpenAI `text-embedding-3` embeddings, SQLite-vec and selectable `bm25` / `vector` / `hybrid` modes (`--search-mode`). Version 2.0 is hybrid-only with local EmbeddingGemma 2 embeddings and SQL Server vector storage, so the costs, latencies and CLI flags below no longer apply. It is kept for context only.
 
 ## Evaluation Scope
 

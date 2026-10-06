@@ -68,7 +68,7 @@ public static class GoldenFixtures
 
     public static bool Exists(string caseName, string tensor) => File.Exists(Path.Combine(Dir, $"{caseName}.{tensor}.json"));
 
-    /// <summary>The real object graph for <paramref name="modelPath"/>, resolved through DI exactly like the CLI does.</summary>
+    /// <summary>The real object graph for <paramref name="modelPath"/>, resolved through DI exactly like the web host does.</summary>
     public static ServiceProvider BuildServices(string modelPath)
     {
         var options = new RagOptions();
