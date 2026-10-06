@@ -190,8 +190,8 @@ All I/O is async: repositories return `Task<T>`, pass `CancellationToken`, avoid
 
 ### Error Handling
 
-- Throw specific exceptions (`FileNotFoundException`, `DirectoryNotFoundException`, `ArgumentException` for bad input, `CliConfigurationException` for missing config).
-- Commands catch exceptions, print `Error: ...` to stderr and return a non-zero exit code.
+- Throw specific exceptions (`ArgumentException` for bad input, `DocumentNotFoundException` when a document was deleted underneath a write, `RagConfigurationException` for missing/invalid config, which stops startup with a clear message).
+- Endpoints return ProblemDetails for expected failures (400/404/409); unexpected exceptions go through `ProblemExceptionHandler` as a generic 500 with details logged only.
 
 ## Testing
 
