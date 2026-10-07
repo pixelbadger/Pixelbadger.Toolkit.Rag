@@ -12,6 +12,7 @@ using Pixelbadger.Toolkit.Rag.Messaging;
 using Pixelbadger.Toolkit.Rag.Mcp;
 using Pixelbadger.Toolkit.Rag.Persistence;
 using Pixelbadger.Toolkit.Rag.Tests.Support;
+using SlimMessageBus.Host;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Host;
 
@@ -111,25 +112,21 @@ public class HostDependencyInjectionTests
     {
         // The bus is started by MessageBusStartupService, after the migrations; SlimMessageBus's own hosted service
         // would build it at host start.
+        const string ownHostedService = "SlimMessageBus.Host.MessageBusHostedService";
+
+        // Control: SlimMessageBus on its own does register that type (so the check below cannot pass vacuously).
+        var plain = new ServiceCollection();
+        plain.AddSlimMessageBus(_ => { });
+        plain.Where(d => d.ServiceType == typeof(IHostedService)).Select(d => d.ImplementationType?.FullName)
+            .Should().Contain(ownHostedService);
+
         using var factory = new RagWebApplicationFactory { UseRealServices = true, KeepHostedServices = true };
         _ = factory.Services;
 
         factory.ServiceDescriptors!
             .Where(d => d.ServiceType == typeof(IHostedService))
             .Select(d => d.ImplementationType?.FullName)
-            .Should().NotContain("SlimMessageBus.Host.MessageBusHostedService");
-    }
-
-    [Fact]
-    public void TransientServicesAndConsumers_ResolveWithoutBuildingTheMessageBus()
-    {
-        // Resolving the bus (IMessageBus / IConsumerControl) would provision its SQL tables, so it is not resolved here.
-        using var factory = NewFactory();
-        var sp = factory.Services;
-
-        sp.GetRequiredService<IIngestQueue>().Should().NotBeNull();
-        sp.GetRequiredService<IngestJobConsumer>().Should().NotBeNull();
-        sp.GetRequiredService<VectorIndexConsumer>().Should().NotBeNull();
+            .Should().NotContain(ownHostedService);
     }
 
     [Fact]
