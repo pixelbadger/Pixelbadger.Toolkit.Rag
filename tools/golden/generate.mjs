@@ -11,10 +11,10 @@
 // Options / env:
 //   --model <dir|hf-id>   default: $PBRAG_MODEL_PATH, else onnx-community/embeddinggemma-2-ONNX (needs hub access)
 //   --out <dir>           default: ../../Pixelbadger.Toolkit.Rag.Tests/test-assets/golden
-//   --dtype <fp32|...>    default fp32 (never fp16 activations)
+//   --dtype <q8|...>      default q8: the service ships the q8 graphs (onnx/*_quantized.onnx), so fixtures must come from them
 //
 // Output (all under --out):
-//   manifest.json                        provenance (model, versions, date)
+//   manifest.json                        provenance (model, dtype, versions, date); the C# golden tests skip unless dtype is "q8"
 //   txt.texts.json                       the exact queries/documents that were embedded
 //   img-square.png, img-wide.png         synthetic, deterministic images (768x768 and 640x384)
 //   aud-short.wav, aud-multiclip.wav     synthetic, deterministic 16 kHz mono 16-bit speech-like audio (5.0 s and 30.0 s)
@@ -43,7 +43,7 @@ const opt = (name, fallback) => {
 
 const modelId = opt("--model", process.env.PBRAG_MODEL_PATH || "onnx-community/embeddinggemma-2-ONNX");
 const outDir = path.resolve(opt("--out", path.join(here, "../../Pixelbadger.Toolkit.Rag.Tests/test-assets/golden")));
-const dtype = opt("--dtype", "fp32");
+const dtype = opt("--dtype", "q8");
 const inputsOnly = flag("--inputs-only");
 fs.mkdirSync(outDir, { recursive: true });
 

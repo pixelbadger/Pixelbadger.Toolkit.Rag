@@ -23,7 +23,7 @@ A .NET 10 ASP.NET Core app (minimal APIs, v4.x, shipped as a container) for Retr
 
 ### Key decisions
 
-- Embeddings: local `onnx-community/embeddinggemma-2-ONNX`, fp32, 256-d Matryoshka (truncate + re-normalise). **The service never downloads models**; `Rag:ModelPath` / `PBRAG_MODEL_PATH` points at a local copy. No OpenAI.
+- Embeddings: local `onnx-community/embeddinggemma-2-ONNX`, q8 (`onnx/model_quantized.onnx`, `vision_encoder_quantized.onnx`, `audio_encoder_quantized.onnx`; fp32/fp16 unused), model id `embeddinggemma-2-q8@256`, 256-d Matryoshka (truncate + re-normalise). **The service never downloads models**; `Rag:ModelPath` / `PBRAG_MODEL_PATH` points at a local copy. No OpenAI.
 - Persistence: SQL Server 2025 / Azure SQL (EF Core 10, `vector(256)`). SQL is the only index; everything shown to users is hydrated from SQL.
 - Search: vector only (cosine similarity over SQL). There is no BM25 / keyword / hybrid mode, no reranker, no search-mode option, no MCP `searchMode`. BM25 and RRF were removed in 4.0 because image/audio chunks could only score from one list and were under-ranked.
 - Documents: **upload only** (`POST /api/documents`, batch allowed); the server never reads caller-named paths from its own disk. A document's id is a server-assigned `Guid` (v7) created with the upload; the *logical path* (the multipart filename) is metadata only and may repeat. One job = one file for one document; jobs live in SQL and are processed by a hosted worker.
@@ -115,7 +115,7 @@ Pixelbadger.Toolkit.Rag/
 ├── Persistence/                 # IDocumentStore + EF Core SQL implementation, RagDbContext, SqlStoreOptions
 ├── Embeddings/                  # IEmbeddingService, Text/ (Gemma), Vision/, Audio/, Onnx/ (sessions, options)
 ├── Dtos/                        # SearchResult, IngestResult/IngestSource, IngestOptions
-├── Migrations/                  # EF Core migrations (InitialCreate, AddIngestQueue, DocumentGuidIdsAndFlatJobs, DocumentSourceContent)
+├── Migrations/                  # EF Core migrations (InitialCreate, AddIngestQueue, DocumentGuidIdsAndFlatJobs, DocumentSourceContent, QuantizedEmbeddingsQ8)
 └── ClientApp/                   # React SPA: src/api (fetch wrapper, types, content URL helpers), src/app (router, shell), src/components, src/pages (jobs, query, ingest), src/test (MSW)
 Pixelbadger.Toolkit.Rag.ServiceDefaults/ # Aspire service defaults, trimmed to OpenTelemetry (OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set)
 Pixelbadger.Toolkit.Rag.AppHost/ # Aspire AppHost: local orchestration + Azure (ACA + Azure SQL) publish
@@ -142,7 +142,7 @@ tools/golden/                    # transformers.js scripts that generate golden 
 ### Domain model
 
 - `Document`: int PK + unique `GlobalId` **Guid** (`Guid.CreateVersion7()`, assigned when the document is created at upload time; the id callers see and filter by). The row exists from POST time (status `Queued`, empty `ContentHash`, no `SourceContent`) so the id can be returned; `SourcePath` / `Title` / `Modality` / `SourceContent` / `ContentType` are those of the latest *successfully indexed* upload (the first upload's path until then). Uploading the same path twice makes two documents. `IndexStatus` (`Queued/Processing/Indexed/Failed`) follows the latest job.
-- `Chunk` (table `dbo.Chunks_EG2_256`): int clustered PK, unique `GlobalId` Guid (shown to users as chunk id), `DocumentId` FK (cascade delete), ordinal, modality, locator range (chars for text, ms for audio, none for images), text (text chunks only), `vector(256)` embedding.
+- `Chunk` (table `dbo.Chunks_EG2Q8_256`, vector index `VIX_Chunks_EG2Q8_256_Embedding`): int clustered PK, unique `GlobalId` Guid (shown to users as chunk id), `DocumentId` FK (cascade delete), ordinal, modality, locator range (chars for text, ms for audio, none for images), text (text chunks only), `vector(256)` embedding.
 - `IngestJob` (`dbo.IngestJobs`, one row per job, FK to the document with cascade delete): status (`Queued/Processing/Succeeded/Skipped/Failed`), attempts, lease owner/expiry, logical path, `varbinary(max)` content that is NULLed once the job is terminal, chunk count, error. Job history is kept; the document view shows the latest job. A document has at most one non-terminal job.
 
 ### Data Flow
@@ -320,11 +320,11 @@ Bound from the `Rag` section (appsettings, env `Rag__*`, command line) by `RagCo
 | `Rag:Ingest:MaxFileSizeBytes` / `MaxFilesPerRequest` / `MaxChunkCharacters` | | Default 10 MiB / 100 / 20000. Also drive the request body limits. |
 | `Rag:Ingest:MaxAttempts` / `LeaseSeconds` / `PollIntervalSeconds` / `CancelTimeoutSeconds` | | Default 3 / 600 / 2 / 30. |
 
-Prerequisites outside the repo: SQL Server 2025 (e.g. `docker run -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e 'MSSQL_SA_PASSWORD=...' -p 1433:1433 mcr.microsoft.com/mssql/server:2025-latest`; the DiskANN index is a preview feature on SQL Server 2025 and needs `PREVIEW_FEATURES = ON`), the model files (`huggingface-cli download onnx-community/embeddinggemma-2-ONNX` with `tokenizer.json`, `config.json`, `processor_config.json` and fp32 `onnx/model`, `onnx/vision_encoder`, `onnx/audio_encoder`; each `.onnx_data` must sit beside its `.onnx`), and `ffmpeg` on PATH for audio (included in the container image).
+Prerequisites outside the repo: SQL Server 2025 (e.g. `docker run -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e 'MSSQL_SA_PASSWORD=...' -p 1433:1433 mcr.microsoft.com/mssql/server:2025-latest`; the DiskANN index is a preview feature on SQL Server 2025 and needs `PREVIEW_FEATURES = ON`), the model files (`huggingface-cli download onnx-community/embeddinggemma-2-ONNX` with `tokenizer.json`, `config.json`, `processor_config.json` and the q8 `onnx/model_quantized.onnx`, `onnx/vision_encoder_quantized.onnx`, `onnx/audio_encoder_quantized.onnx`, fetched with `--include "onnx/model_quantized.onnx*"` etc. so any `.onnx_data` sidecar comes along; a sidecar is optional but must sit beside its `.onnx`), and `ffmpeg` on PATH for audio (included in the container image).
 
 ## Storage
 
-- **SQL:** `dbo.Documents`, `dbo.Chunks_EG2_256` (text, metadata, `vector(256)`), `dbo.IngestJobs` (queue and job history); schema managed by EF Core migrations applied at startup (`Rag:ApplyMigrationsOnStartup`)
+- **SQL:** `dbo.Documents`, `dbo.Chunks_EG2Q8_256` (text, metadata, `vector(256)`), `dbo.IngestJobs` (queue and job history); schema managed by EF Core migrations applied at startup (`Rag:ApplyMigrationsOnStartup`)
 
 ## MCP Server Integration
 
@@ -370,7 +370,7 @@ Prerequisites outside the repo: SQL Server 2025 (e.g. `docker run -e ACCEPT_EULA
 
 ### Changing the Embedding Model or Dimension
 
-The chunk table name (`Chunks_EG2_256`) and `EmbeddingModelOptions.ModelId` encode the model and dimension. Changing either requires a new table, a migration and a full re-embed.
+The chunk table name (`Chunks_EG2Q8_256`) and `EmbeddingModelOptions.ModelId` encode the model and dimension. Changing either requires a new table, a migration and a full re-embed (5.0 did this for fp32 -> q8: its migration deletes all documents; the version rule above is unaffected, any change under `Pixelbadger.Toolkit.Rag/` needs a bump).
 
 ## Troubleshooting
 
@@ -382,7 +382,7 @@ The chunk table name (`Chunks_EG2_256`) and `EmbeddingModelOptions.ModelId` enco
 
 **Re-ingest or delete answers `409`**: the document's job is running (re-ingest: wait and upload again) or did not stop within `Rag:Ingest:CancelTimeoutSeconds` (delete: retry).
 
-**Upgrading from 2.x**: the 3.0 migration drops and recreates the document, chunk and job tables; re-upload.
+**Upgrading from 2.x**: the 3.0 migration drops and recreates the document, chunk (then `Chunks_EG2_256`) and job tables; re-upload.
 
 **Upgrading from 3.x**: 4.0 removed BM25/hybrid search and `Rag:IndexPath` / `PBRAG_INDEX_PATH` (ignored if still set; the old index directory can be deleted). No migration, no re-upload.
 
@@ -390,6 +390,8 @@ The chunk table name (`Chunks_EG2_256`) and `EmbeddingModelOptions.ModelId` enco
 
 **Audio ingestion fails**: install `ffmpeg` and put it on `PATH` (the container image includes it).
 
+**Upgrading from 4.x**: 5.0 switches to the q8 graphs and its `QuantizedEmbeddingsQ8` migration deletes ALL documents, chunks and job history (no conversion; fp32 vectors are incompatible). Download the q8 files (for Azure re-run `scripts/upload-model.sh` / `azd up` postprovision), then re-upload content.
+
 **Vector index problems on local SQL Server**: the DiskANN index is a preview on SQL Server 2025; set `Rag:ExactVectorSearch=true`.
 
-**Model fails to load**: confirm each `.onnx_data` sits beside its `.onnx` with its original filename.
+**Model fails to load**: confirm the `*_quantized.onnx` files exist under `onnx/` (fp32 `model.onnx` is not used) and that any `.onnx_data` sits beside its `.onnx` with its original filename.
