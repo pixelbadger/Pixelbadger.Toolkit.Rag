@@ -69,7 +69,7 @@ public abstract class PipelineBehaviorTests : IDisposable
         using var h = await NewHarnessAsync();
         var path = h.Write("doc.txt", "zebra stripes\n\nzebra herd");
         var first = await h.IngestAsync(path);
-        (await h.Search.SearchAsync("zebra", 10)).Should().HaveCount(2);
+        (await h.Search.SearchAsync("zebra", 10)).Should().ContainSingle().Which.Content.Should().Contain("zebra");
 
         File.WriteAllText(path, "giraffe neck");
         var second = await h.IngestAsync(path, documentId: first.DocumentId);
@@ -126,11 +126,12 @@ public abstract class PipelineBehaviorTests : IDisposable
 
         result.Modality.Should().Be(Modality.Audio);
         result.ChunkCount.Should().Be(3);
-        var hits = await h.Search.SearchAsync("spoken words", 10);
-        hits.Should().HaveCount(3);
-        hits.OrderBy(r => r.Ordinal).Select(r => (r.LocatorStart, r.LocatorEnd))
-            .Should().Equal((0L, 30_000L), (30_000L, 60_000L), (60_000L, 90_000L));
-        hits.Should().OnlyContain(r => r.Modality == Modality.Audio && r.Content == null);
+        // Search returns the document's nearest window only.
+        var hit = (await h.Search.SearchAsync("spoken words", 10)).Should().ContainSingle().Subject;
+        (hit.LocatorStart, hit.LocatorEnd).Should().BeOneOf((0L, 30_000L), (30_000L, 60_000L), (60_000L, 90_000L));
+        hit.LocatorStart.Should().Be((hit.Ordinal - 1) * 30_000L);
+        hit.Modality.Should().Be(Modality.Audio);
+        hit.Content.Should().BeNull();
     }
 
     [SkippableFact]
@@ -393,8 +394,11 @@ public abstract class PipelineBehaviorTests : IDisposable
     public async Task Search_RanksNearestChunkFirst_WithCosineSimilarityScores()
     {
         using var h = await NewHarnessAsync();
-        h.Write("corpus.txt", "alpha beta gamma\n\ndelta epsilon zeta\n\neta theta iota\n\nkappa lambda mu");
-        await h.IngestAsync(Path.Combine(h.ContentDir, "corpus.txt"));
+        h.Write("a.txt", "alpha beta gamma");
+        h.Write("b.txt", "delta epsilon zeta");
+        h.Write("c.txt", "eta theta iota");
+        h.Write("d.txt", "kappa lambda mu");
+        await h.IngestAllAsync();
 
         // The mock embeds identical text identically, so the chunk is also the nearest vector (cosine similarity 1).
         var results = await h.Search.SearchAsync("alpha beta gamma", 4);
@@ -422,10 +426,26 @@ public abstract class PipelineBehaviorTests : IDisposable
     public async Task Search_RespectsMaxResults()
     {
         using var h = await NewHarnessAsync();
-        h.Write("a.txt", string.Join("\n\n", Enumerable.Range(1, 12).Select(i => $"token paragraph {i}")));
-        await h.IngestAsync(Path.Combine(h.ContentDir, "a.txt"));
+        foreach (var i in Enumerable.Range(1, 12)) h.Write($"{i}.txt", $"token paragraph {i}");
+        await h.IngestAllAsync();
 
         (await h.Search.SearchAsync("token", 3)).Should().HaveCount(3);
+    }
+
+    [SkippableFact]
+    public async Task Search_ReturnsOneResultPerDocument_NearestChunkFirst()
+    {
+        using var h = await NewHarnessAsync();
+        h.Write("long.txt", string.Join("\n\n", Enumerable.Range(1, 12).Select(i => $"token paragraph {i}")));
+        h.Write("short.txt", "something else");
+        await h.IngestAllAsync();
+
+        var results = await h.Search.SearchAsync("token paragraph 7", 10);
+
+        results.Should().HaveCount(2);
+        results.Select(r => r.DocumentId).Should().OnlyHaveUniqueItems();
+        results[0].Content.Should().Be("token paragraph 7");
+        results[1].Content.Should().Be("something else");
     }
 
     [SkippableFact]

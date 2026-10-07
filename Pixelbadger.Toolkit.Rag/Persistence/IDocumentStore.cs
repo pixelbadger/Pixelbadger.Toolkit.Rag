@@ -84,7 +84,8 @@ public interface IDocumentStore
     Task<bool> DeleteDocumentAsync(Guid documentId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Nearest chunks to <paramref name="queryEmbedding"/> (256-d, unit length), ascending distance.
+    /// The nearest chunk of each of the <paramref name="maxResults"/> nearest documents to
+    /// <paramref name="queryEmbedding"/> (256-d, unit length), ascending distance: one hit per document.
     /// Optional filter on document ids. Uses approximate VECTOR_SEARCH when the vector
     /// index exists and <see cref="SqlStoreOptions.SearchMode"/> allows it, else exact VECTOR_DISTANCE.
     /// </summary>

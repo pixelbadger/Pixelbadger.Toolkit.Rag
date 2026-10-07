@@ -167,7 +167,7 @@ The worker treats a cancelled job (registry) and `DocumentNotFoundException` (do
 
 **Search:**
 ```
-Query -> SearchService -> embed -> IDocumentStore.SearchAsync (n nearest, cosine) -> hydrate via IDocumentStore -> SearchResults (Score = 1 - distance)
+Query -> SearchService -> embed -> IDocumentStore.SearchAsync (n nearest documents, best chunk each, cosine) -> hydrate via IDocumentStore -> SearchResults (Score = 1 - distance)
 ```
 
 ## Code Conventions
@@ -301,7 +301,7 @@ Edit `Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj` (`<Version>X.Y.Z</
 
 Vector only. Algorithm:
 1. Embed the query (EmbeddingGemma 2, 256-d)
-2. Fetch exactly `maxResults` nearest chunks from SQL (`IDocumentStore.SearchAsync`), optionally filtered by `documentIds`
+2. Fetch the `maxResults` nearest *documents* from SQL (`IDocumentStore.SearchAsync`), each as its single nearest chunk (one result per document, so a long text document cannot crowd out image/audio results), optionally filtered by `documentIds`. Exact search ranks chunks per document in SQL (`ROW_NUMBER() ... PARTITION BY DocumentId`); approximate search over-fetches candidate chunks, keeps the first per document, and falls back to exact when fewer than `maxResults` documents survive
 3. Hydrate the chunks from SQL and return them in vector-hit order; hits whose chunk vanished meanwhile (document deleted) are skipped
 4. `SearchResult.Score` is the cosine similarity, `1 - cosine distance`; higher is more similar. Text, image and audio chunks compete on the same metric.
 

@@ -307,23 +307,70 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         top.DocumentGlobalId.Should().Be(ids["p3"]);
         top.Ordinal.Should().Be(2);
 
-        // Opposite vector -> cosine distance ~2 for the same chunk.
-        var opposite = target.Embedding.Select(x => -x).ToArray();
+        // Opposite vector -> cosine distance ~2 for a single-chunk document.
+        var solo = Chunk(1, "solo");
+        await store.ReplaceDocumentAsync(await NewDocAsync(cs, "solo"), Doc("solo"), [solo]);
+        var opposite = solo.Embedding.Select(x => -x).ToArray();
         var all = await store.SearchAsync(opposite, 20, null);
-        all.Should().HaveCount(20);
-        all[^1].ChunkId.Should().Be(hits[0].ChunkId);
+        all.Should().HaveCount(6); // one hit per document
         all[^1].Distance.Should().BeApproximately(2f, 1e-3f);
     }
 
     [Fact]
-    public async Task Search_FewerRowsThanMaxResults_ReturnsAll_AndEmptyStoreReturnsNothing()
+    public async Task Search_FewerDocumentsThanMaxResults_ReturnsOnePerDocument_AndEmptyStoreReturnsNothing()
     {
         var (store, cs) = await CreateMigratedStoreAsync();
         (await store.SearchAsync(MockEmbeddingService.Vector("q"), 5, null)).Should().BeEmpty();
 
         await store.ReplaceDocumentAsync(await NewDocAsync(cs, "alpha"), Doc("alpha"), Chunks("a", 2));
+        await store.ReplaceDocumentAsync(await NewDocAsync(cs, "beta"), Doc("beta"), Chunks("b", 3));
         (await store.SearchAsync(MockEmbeddingService.Vector("q"), 5, null)).Should().HaveCount(2);
         (await store.SearchAsync(MockEmbeddingService.Vector("q"), 0, null)).Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Search_LongDocumentNearTheQuery_DoesNotCrowdOutOtherDocuments(bool withVectorIndex)
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var query = MockEmbeddingService.Vector("query");
+
+        // 300 chunks, all nearer the query than anything else: more than the approximate path's candidates.
+        var longId = await NewDocAsync(cs, "long");
+        var near = Enumerable.Range(1, 300)
+            .Select(i => Chunk(i, $"long-{i}") with { Embedding = Blend(query, MockEmbeddingService.Vector($"long-{i}"), 0.1f) })
+            .ToList();
+        await store.ReplaceDocumentAsync(longId, Doc("long"), near);
+        var picId = await NewDocAsync(cs, "pic");
+        await store.ReplaceDocumentAsync(picId, Doc("pic", Modality.Image),
+            [new ChunkDraft(1, Modality.Image, null, null, null, Blend(query, MockEmbeddingService.Vector("pic"), 1f))]);
+        var ids = await PopulateAsync(store, cs, documents: 3, chunksPerDoc: 2);
+        if (withVectorIndex)
+        {
+            await store.EnsureVectorIndexAsync();
+            (await VectorIndexCountAsync(cs)).Should().Be(1);
+        }
+
+        var hits = await store.SearchAsync(query, 3, null);
+
+        hits.Should().HaveCount(3);
+        hits.Select(h => h.Distance).Should().BeInAscendingOrder();
+        var documents = (await store.GetChunksAsync(hits.Select(h => h.ChunkId).ToList()))
+            .ToDictionary(c => c.ChunkId, c => c.DocumentGlobalId);
+        var ranked = hits.Select(h => documents[h.ChunkId]).ToList();
+        ranked.Should().OnlyHaveUniqueItems();
+        ranked[0].Should().Be(longId);
+        ranked[1].Should().Be(picId);
+        ids.Values.Should().Contain(ranked[2]);
+    }
+
+    /// <summary>Unit-length <paramref name="target"/> + <paramref name="noise"/> * <paramref name="other"/>.</summary>
+    private static float[] Blend(float[] target, float[] other, float noise)
+    {
+        var v = target.Zip(other, (t, o) => t + noise * o).ToArray();
+        var norm = MathF.Sqrt(v.Sum(x => x * x));
+        return v.Select(x => x / norm).ToArray();
     }
 
     [Fact]
@@ -345,12 +392,12 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         (await store.GetChunksAsync([unfiltered[0].ChunkId])).Single().DocumentGlobalId.Should().Be(ids["p0"]);
 
         var filtered = await store.SearchAsync(query, 10, [ids["p1"], ids["p2"]]);
-        filtered.Should().HaveCount(6);
-        var documents = (await store.GetChunksAsync(filtered.Select(h => h.ChunkId).ToList())).Select(c => c.DocumentGlobalId).Distinct();
+        filtered.Should().HaveCount(2); // one hit per document
+        var documents = (await store.GetChunksAsync(filtered.Select(h => h.ChunkId).ToList())).Select(c => c.DocumentGlobalId);
         documents.Should().BeEquivalentTo([ids["p1"], ids["p2"]]);
 
         (await store.SearchAsync(query, 10, [Guid.NewGuid()])).Should().BeEmpty();
-        (await store.SearchAsync(query, 10, [])).Should().HaveCount(10); // empty filter = no filter
+        (await store.SearchAsync(query, 10, [])).Should().HaveCount(4); // empty filter = no filter
     }
 
     [Fact]
@@ -451,17 +498,17 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         await store.EnsureVectorIndexAsync();
         var query = MockEmbeddingService.Vector("filter-query");
 
+        // Fewer matching documents than requested: must fall back to exact and return each one's nearest chunk.
         var filtered = await store.SearchAsync(query, 5, [ids["p3"], ids["p9"]]);
-        filtered.Should().HaveCount(5);
+        filtered.Should().HaveCount(2);
         (await store.GetChunksAsync(filtered.Select(h => h.ChunkId).ToList())).Select(c => c.DocumentGlobalId)
-            .Should().OnlyContain(d => d == ids["p3"] || d == ids["p9"]);
+            .Should().BeEquivalentTo([ids["p3"], ids["p9"]]);
 
-        // Fewer matching rows than requested: must fall back to exact and return all of them.
-        var all = await store.SearchAsync(query, 50, [ids["p3"]]);
-        all.Should().HaveCount(10);
+        var truth = await NewStore(cs, VectorSearchMode.ExactOnly).SearchAsync(query, 5, [ids["p3"], ids["p9"]]);
+        filtered.Select(h => h.ChunkId).Should().Equal(truth.Select(h => h.ChunkId));
 
-        var truth = await NewStore(cs, VectorSearchMode.ExactOnly).SearchAsync(query, 10, [ids["p3"]]);
-        all.Select(h => h.ChunkId).Should().BeEquivalentTo(truth.Select(h => h.ChunkId));
+        var single = await store.SearchAsync(query, 50, [ids["p3"]]);
+        single.Should().ContainSingle();
     }
 
     [Fact]
