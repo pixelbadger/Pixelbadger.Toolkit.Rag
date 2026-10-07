@@ -507,4 +507,32 @@ public sealed class SqlIngestQueue : IIngestQueue
             : null;
         return new DocumentDto(row.GlobalId, row.SourcePath, row.Title, row.Modality, row.IndexStatus, row.ChunkCount, row.UpdatedAtUtc, latest);
     }
+
+    /// <inheritdoc />
+    public async Task<IngestJobPage> GetJobsAsync(
+        int page, int pageSize, IngestJobStatus? status = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(page, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(pageSize, 1);
+
+        await using var db = CreateContext();
+
+        var jobs = db.IngestJobs.AsNoTracking();
+        if (status is { } s)
+            jobs = jobs.Where(j => j.Status == s);
+
+        var total = await jobs.CountAsync(cancellationToken);
+
+        // Projection leaves Content, the lease fields and the document's blobs/chunks out of the SELECT.
+        var items = await jobs
+            .OrderByDescending(j => j.CreatedAtUtc).ThenByDescending(j => j.Id)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(j => new IngestJobListItemDto(
+                j.Id, j.Document!.GlobalId, j.LogicalPath, j.Status, j.Attempts, j.MaxChunkCharacters, j.SizeBytes,
+                j.ChunkCount, j.CreatedAtUtc, j.StartedAtUtc, j.CompletedAtUtc, j.Error))
+            .ToListAsync(cancellationToken);
+
+        return new IngestJobPage(items, page, pageSize, total);
+    }
 }

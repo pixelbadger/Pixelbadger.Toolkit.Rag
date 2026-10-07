@@ -113,4 +113,30 @@ public interface IIngestQueue
 
     /// <summary>A document with its latest job, or null when unknown.</summary>
     Task<DocumentDto?> GetDocumentAsync(Guid documentId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// One page of jobs (any status, or only <paramref name="status"/>), newest first (CreatedAtUtc, then Id, descending).
+    /// <paramref name="page"/> is 1-based. Stored bytes and lease details are never read.
+    /// </summary>
+    Task<IngestJobPage> GetJobsAsync(
+        int page, int pageSize, IngestJobStatus? status = null, CancellationToken cancellationToken = default);
 }
+
+/// <summary>A job as listed by <c>/api/jobs</c>. Never carries file bytes or lease details.</summary>
+/// <param name="ChunkCount">The job's own terminal chunk count (not the document's current total); null until it completes.</param>
+public sealed record IngestJobListItemDto(
+    Guid JobId,
+    Guid DocumentId,
+    string Path,
+    IngestJobStatus Status,
+    int Attempts,
+    int MaxChunkCharacters,
+    long SizeBytes,
+    int? ChunkCount,
+    DateTime CreatedAtUtc,
+    DateTime? StartedAtUtc,
+    DateTime? CompletedAtUtc,
+    string? Error);
+
+/// <summary>One page of jobs, newest first. <see cref="TotalCount"/> counts all jobs matching the filter.</summary>
+public sealed record IngestJobPage(IReadOnlyList<IngestJobListItemDto> Jobs, int Page, int PageSize, int TotalCount);
