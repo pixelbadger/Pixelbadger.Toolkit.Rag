@@ -7,6 +7,8 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
 using Pixelbadger.Toolkit.Rag.Ingestion;
 using Pixelbadger.Toolkit.Rag.Persistence;
 
+using Pixelbadger.Toolkit.Rag.Tests.Ingestion;
+
 namespace Pixelbadger.Toolkit.Rag.Tests.Pipeline;
 
 /// <summary>In-memory IDocumentStore with brute-force cosine search, for unit tests.</summary>
@@ -225,7 +227,8 @@ public sealed class PipelineHarness : IDisposable
 
     /// <summary>A <see cref="DocumentService"/> over this harness's store.</summary>
     public DocumentService NewDocumentService() => new(
-        new IngestSettings(), Store, new IngestJobRegistry(), NullLogger<DocumentService>.Instance);
+        new IngestSettings(), Store, new IngestJobRegistry(), new InMemoryIngestQueue(), new NoIngestKeepAlive(),
+        NullLogger<DocumentService>.Instance);
 
     /// <summary>Creates a new document for a logical path (what a document upload does before its job runs).</summary>
     public Task<Guid> NewDocumentAsync(string logicalPath) => _createDocument(LogicalPath.Normalize(logicalPath));

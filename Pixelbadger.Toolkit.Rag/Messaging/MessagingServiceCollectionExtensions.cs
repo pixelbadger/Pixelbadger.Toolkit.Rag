@@ -30,9 +30,11 @@ public static class MessagingServiceCollectionExtensions
         var connectionString = options.Sql.ConnectionString;
         var ingest = options.Ingest;
 
+        SqlMessageBusSettings? transport = null;
         services.AddSlimMessageBus(mbb => mbb
             .WithProviderSql(cfg =>
             {
+                transport = cfg;
                 cfg.ConnectionString = connectionString;
                 cfg.DatabaseTableName = JobEvents.MessagesTable;
                 cfg.DatabaseMigrationsTableName = JobEvents.MessagesMigrationsTable;
@@ -42,6 +44,8 @@ public static class MessagingServiceCollectionExtensions
                 // Backstop only: the ingest service fails the job itself after Rag:Ingest:MaxAttempts.
                 cfg.MaxDeliveryAttempts = ingest.MaxAttempts + 2;
             })
+            // Same transport (WithProviderSql registered its services and settings), with consumers that stop cleanly.
+            .WithProvider(settings => new QuietStopSqlMessageBus(settings, transport!))
             .AddJsonSerializer()
             .AutoStartConsumersEnabled(false)
             .Produce<JobStatusChanged>(x => x.DefaultTopic(JobEvents.Topic).ToTopic().UseOutbox())
@@ -68,6 +72,7 @@ public static class MessagingServiceCollectionExtensions
                 services.RemoveAt(i);
         }
 
+        services.AddTransient<IDeliveredMessageCleanup, DeliveredMessageCleanup>();
         services.AddTransient<IngestJobConsumer>();
         services.AddTransient<VectorIndexConsumer>();
         return services;

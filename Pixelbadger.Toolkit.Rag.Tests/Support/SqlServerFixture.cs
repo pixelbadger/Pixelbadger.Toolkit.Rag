@@ -46,6 +46,9 @@ public sealed class SqlServerFixture : IAsyncLifetime
             await conn.OpenAsync();
             await using var create = new SqlCommand($"CREATE DATABASE [{name}]", conn);
             await create.ExecuteNonQueryAsync();
+            // Row-versioned reads, as on Azure SQL (the EventDrivenIngest migration would otherwise switch it on, slowly).
+            await using var rcsi = new SqlCommand($"ALTER DATABASE [{name}] SET READ_COMMITTED_SNAPSHOT ON", conn);
+            await rcsi.ExecuteNonQueryAsync();
         }
 
         var builder = new SqlConnectionStringBuilder(_serverConnectionString) { InitialCatalog = name, TrustServerCertificate = true };

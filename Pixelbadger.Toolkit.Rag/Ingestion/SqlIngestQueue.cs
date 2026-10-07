@@ -28,10 +28,9 @@ public sealed class SqlIngestQueue : IIngestQueue
     private readonly IServiceScopeFactory _scopes;
     private readonly DbContextOptions<RagDbContext> _dbOptions;
 
-    public SqlIngestQueue(SqlStoreOptions sql, IngestSettings settings, IServiceScopeFactory scopes)
+    public SqlIngestQueue(SqlStoreOptions sql, IServiceScopeFactory scopes)
     {
         ArgumentNullException.ThrowIfNull(sql);
-        ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(scopes);
         if (string.IsNullOrWhiteSpace(sql.ConnectionString))
             throw new ArgumentException("A SQL Server connection string is required.", nameof(sql));

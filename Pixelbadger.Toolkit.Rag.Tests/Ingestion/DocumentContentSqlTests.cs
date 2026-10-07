@@ -1,5 +1,3 @@
-// Disabled until stream 2a ports it to IngestJobService (the polling IngestWorker is gone).
-#if false
 using System.Text;
 using FluentAssertions;
 using Microsoft.Data.SqlClient;
@@ -15,7 +13,7 @@ using Pixelbadger.Toolkit.Rag.Tests.Support;
 namespace Pixelbadger.Toolkit.Rag.Tests.Ingestion;
 
 /// <summary>
-/// The canonical source of a document through the real stack: SQL queue + real ingest worker + real ingester +
+/// The canonical source of a document through the real stack: SQL queue + real ingest job service + real ingester +
 /// SQL store. Source bytes must become canonical only when (and together with) a successful index.
 /// </summary>
 [Collection("SqlServer")]
@@ -25,7 +23,9 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
 
     private readonly List<PipelineHarness> _harnesses = [];
 
-    private sealed record Stack(SqlIngestQueue Queue, SqlDocumentStore Store, IngestWorker Worker, string ConnectionString);
+    private readonly List<BusHarness> _buses = [];
+
+    private sealed record Stack(SqlIngestQueue Queue, SqlDocumentStore Store, IngestJobService Service, string ConnectionString);
 
     private async Task<Stack> CreateAsync()
     {
@@ -34,26 +34,23 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         var store = new SqlDocumentStore(options);
         await store.MigrateAsync();
         var settings = new IngestSettings { MaxFileSizeBytes = MaxFileSize, MaxAttempts = 3 };
-        var queue = new SqlIngestQueue(options, settings);
+        // The bus is built (events go to the outbox) but never started: the tests run jobs by calling the service.
+        var bus = await BusHarness.CreateAsync(cs);
+        _buses.Add(bus);
+        var queue = new SqlIngestQueue(options, bus.Scopes);
 
         var harness = new PipelineHarness(store, createDocument: _ => throw new NotSupportedException());
         _harnesses.Add(harness);
-        var services = new ServiceCollection()
-            .AddSingleton<IIngestQueue>(queue)
-            .AddSingleton<IContentIngester>(harness.Ingester)
-            .AddSingleton<IDocumentStore>(store)
-            .BuildServiceProvider();
-        var scopes = services.GetRequiredService<IServiceScopeFactory>();
-        var worker = new IngestWorker(
-            scopes, settings, new IngestWorkerSignal(), new IngestJobRegistry(),
-            new InFlightJobRecovery(scopes, NullLogger<InFlightJobRecovery>.Instance), new NoIngestKeepAlive(),
-            NullLogger<IngestWorker>.Instance);
-        return new Stack(queue, store, worker, cs);
+        var service = new IngestJobService(
+            queue, harness.Ingester, settings, new IngestJobRegistry(), new NoIngestKeepAlive(),
+            NullLogger<IngestJobService>.Instance);
+        return new Stack(queue, store, service, cs);
     }
 
     public void Dispose()
     {
         foreach (var h in _harnesses) h.Dispose();
+        foreach (var b in _buses) b.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 
     private static IngestUpload Upload(string path, byte[] content) =>
@@ -78,10 +75,16 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         return content is null ? null : Encoding.UTF8.GetString(content.Bytes);
     }
 
+    /// <summary>Runs the oldest queued job, as the bus would on its Queued event.</summary>
     private static async Task RunWorkerAsync(Stack s)
     {
-        (await s.Worker.ProcessNextAsync(CancellationToken.None)).Should().BeTrue();
+        var jobId = await NextQueuedJobAsync(s);
+        jobId.Should().NotBeNull("a job is queued");
+        await s.Service.ProcessAsync(jobId!.Value, CancellationToken.None);
     }
+
+    private static async Task<Guid?> NextQueuedJobAsync(Stack s) =>
+        await ScalarAsync<Guid?>(s.ConnectionString, "SELECT TOP (1) Id FROM dbo.IngestJobs WHERE Status = 0 ORDER BY CreatedAtUtc, Id");
 
     [SkippableFact]
     public async Task NewlyQueuedDocument_HasNoDownloadableSource()
@@ -148,7 +151,7 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         await RunWorkerAsync(s);
 
         await s.Queue.EnqueueReingestAsync(created.DocumentId, Upload("a.txt", "version two"), 1000);
-        var claim = await s.Queue.TryClaimNextAsync("other-worker", TimeSpan.FromMinutes(10));
+        var claim = await s.Queue.BeginProcessingAsync((await NextQueuedJobAsync(s))!.Value);
 
         claim.Should().NotBeNull();
         (await s.Queue.GetDocumentAsync(created.DocumentId))!.IndexStatus.Should().Be(IndexStatus.Processing);
@@ -246,5 +249,3 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         (await s.Store.GetContentAsync(created.DocumentId)).Should().BeNull("legacy documents answer 404 until re-ingested");
     }
 }
-
-#endif

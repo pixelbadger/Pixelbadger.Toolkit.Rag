@@ -2,6 +2,7 @@ using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Messaging;
 using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Ingestion;
@@ -12,9 +13,10 @@ public class VectorIndexServiceTests
     private readonly Mock<IIngestQueue> _queue = new();
     private readonly Mock<IDocumentStore> _store = new();
     private readonly Mock<IIngestKeepAlive> _keepAlive = new();
+    private readonly Mock<IDeliveredMessageCleanup> _messages = new();
 
     private VectorIndexService NewService() =>
-        new(_queue.Object, _store.Object, _keepAlive.Object, NullLogger<VectorIndexService>.Instance);
+        new(_queue.Object, _store.Object, _keepAlive.Object, _messages.Object, NullLogger<VectorIndexService>.Instance);
 
     [Fact]
     public async Task OnJobFinished_WithActiveJobs_DoesNothing()
@@ -70,5 +72,27 @@ public class VectorIndexServiceTests
         _queue.Verify(q => q.HasActiveJobsAsync(token), Times.Once);
         _store.Verify(s => s.EnsureVectorIndexAsync(token), Times.Once);
         _keepAlive.Verify(k => k.MarkIdleAsync(token), Times.Once);
+    }
+
+    [Fact]
+    public async Task OnJobFinished_WhenIdle_PurgesDeliveredMessages_AndAPurgeFailureDoesNotStopTheIdleMark()
+    {
+        _queue.Setup(q => q.HasActiveJobsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        _messages.Setup(m => m.PurgeAsync(It.IsAny<CancellationToken>())).ThrowsAsync(new InvalidOperationException("sql blip"));
+
+        await NewService().OnJobFinishedAsync(CancellationToken.None);
+
+        _messages.Verify(m => m.PurgeAsync(It.IsAny<CancellationToken>()), Times.Once);
+        _keepAlive.Verify(k => k.MarkIdleAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task OnJobFinished_WithActiveJobs_DoesNotPurge()
+    {
+        _queue.Setup(q => q.HasActiveJobsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(true);
+
+        await NewService().OnJobFinishedAsync(CancellationToken.None);
+
+        _messages.Verify(m => m.PurgeAsync(It.IsAny<CancellationToken>()), Times.Never);
     }
 }

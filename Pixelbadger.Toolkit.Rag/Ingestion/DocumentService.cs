@@ -20,6 +20,8 @@ public sealed class DocumentService(
     IngestSettings settings,
     IDocumentStore store,
     IngestJobRegistry registry,
+    IIngestQueue queue,
+    IIngestKeepAlive keepAlive,
     ILogger<DocumentService> logger)
 {
     public async Task<DeleteOutcome> DeleteAsync(Guid documentId, CancellationToken cancellationToken = default)
@@ -47,6 +49,25 @@ public sealed class DocumentService(
         // The worker may have claimed the document's queued job after the check above: stop it. Its write would be
         // refused anyway (the document is gone), this just saves the embedding work.
         _ = registry.CancelDocument(documentId);
+        await MarkIdleIfNothingLeftAsync(cancellationToken);
         return DeleteOutcome.Deleted;
+    }
+
+    /// <summary>
+    /// A deleted job never reaches a terminal status, so no JobStatusChanged lets <see cref="IVectorIndexService"/>
+    /// notice that ingest went idle: if that was the last active job, let a scale-to-zero host stop. (The index needs
+    /// no rebuild for a delete.) Best effort: the delete has already happened.
+    /// </summary>
+    private async Task MarkIdleIfNothingLeftAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!await queue.HasActiveJobsAsync(cancellationToken))
+                await keepAlive.MarkIdleAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Could not check for remaining ingest jobs after a delete");
+        }
     }
 }
