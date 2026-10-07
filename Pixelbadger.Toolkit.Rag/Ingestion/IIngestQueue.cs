@@ -23,7 +23,7 @@ public enum ReingestOutcome
 /// <param name="JobId">The queued (or replaced) job; null for <see cref="ReingestOutcome.Conflict"/> and <see cref="ReingestOutcome.NotFound"/>.</param>
 public sealed record ReingestResult(ReingestOutcome Outcome, Guid? JobId = null);
 
-/// <summary>A job claimed by a worker.</summary>
+/// <summary>A job handed to processing by <see cref="IIngestQueue.BeginProcessingAsync"/>.</summary>
 public sealed record IngestJobClaim(
     Guid JobId,
     Guid DocumentId,
@@ -107,13 +107,13 @@ public interface IIngestQueue
 
     /// <summary>
     /// One page of jobs (any status, or only <paramref name="status"/>), newest first (CreatedAtUtc, then Id, descending).
-    /// <paramref name="page"/> is 1-based. Stored bytes and lease details are never read.
+    /// <paramref name="page"/> is 1-based. Stored bytes are never read.
     /// </summary>
     Task<IngestJobPage> GetJobsAsync(
         int page, int pageSize, IngestJobStatus? status = null, CancellationToken cancellationToken = default);
 }
 
-/// <summary>A job as listed by <c>/api/jobs</c>. Never carries file bytes or lease details.</summary>
+/// <summary>A job as listed by <c>/api/jobs</c>. Never carries file bytes.</summary>
 /// <param name="ChunkCount">The job's own terminal chunk count (not the document's current total); null until it completes.</param>
 public sealed record IngestJobListItemDto(
     Guid JobId,

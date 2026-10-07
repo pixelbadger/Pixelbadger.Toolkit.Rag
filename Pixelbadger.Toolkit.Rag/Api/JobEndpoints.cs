@@ -6,7 +6,7 @@ namespace Pixelbadger.Toolkit.Rag.Api;
 
 public sealed record JobsResponse(IReadOnlyList<IngestJobListItemDto> Jobs, int Page, int PageSize, int TotalCount, int TotalPages);
 
-/// <summary>Read-only view of the ingest queue and job history (never exposes stored bytes or leases).</summary>
+/// <summary>Read-only view of the ingest queue and job history (never exposes stored bytes).</summary>
 public static class JobEndpoints
 {
     public const int DefaultPage = 1;

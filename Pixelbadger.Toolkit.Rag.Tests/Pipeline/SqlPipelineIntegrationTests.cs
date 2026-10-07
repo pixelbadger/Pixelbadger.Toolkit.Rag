@@ -28,7 +28,7 @@ public class SqlPipelineIntegrationTests(SqlServerFixture sql) : PipelineBehavio
 
         var queue = await TestIngestQueue.CreateAsync(connectionString);
 
-        // The upload endpoint creates the document row (and its queued job) before the worker ingests into it.
+        // The upload endpoint creates the document row (and its queued job) before ingest runs against it.
         return new StoreUnderTest(store, async path =>
             (await queue.EnqueueNewDocumentsAsync([new IngestUpload(path, 1, () => new MemoryStream([1]))], 1000)).Single().DocumentId);
     }

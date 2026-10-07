@@ -469,7 +469,7 @@ public class DocumentEndpointTests
         using var client = factory.CreateClient();
         var registry = factory.Services.GetRequiredService<IngestJobRegistry>();
         var active = registry.Begin(JobA, DocA, CancellationToken.None);
-        // A stand-in worker: lets go of the job once it is cancelled.
+        // A stand-in for the running job: lets go of it once it is cancelled.
         var worker = Task.Run(async () =>
         {
             await Task.Delay(Timeout.Infinite, active.Token).ContinueWith(_ => { });

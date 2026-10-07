@@ -10,7 +10,7 @@ public sealed record DocumentsResponse(IReadOnlyList<DocumentDto> Documents);
 
 /// <summary>
 /// Document-centric upload endpoints: create documents (batch), re-ingest one, read one, delete one. Uploads are
-/// queued and processed by the background worker; the server never reads caller-named paths from its own disk.
+/// queued and processed in the background; the server never reads caller-named paths from its own disk.
 /// </summary>
 public static class DocumentEndpoints
 {
