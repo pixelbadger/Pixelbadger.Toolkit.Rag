@@ -53,6 +53,10 @@ public class HostDependencyInjectionTests
     [InlineData(typeof(SqlStoreOptions))]
     [InlineData(typeof(EmbeddingModelOptions))]
     [InlineData(typeof(IngestSettings))]
+    [InlineData(typeof(IIngestJobService))]
+    [InlineData(typeof(IVectorIndexService))]
+    [InlineData(typeof(IngestJobConsumer))]
+    [InlineData(typeof(VectorIndexConsumer))]
     public void EveryContractResolvesWithoutModelOrDatabase(Type serviceType)
     {
         using var factory = NewFactory();
@@ -100,6 +104,32 @@ public class HostDependencyInjectionTests
             .ToList();
 
         hosted.Should().ContainInOrder(typeof(DatabaseMigrationHostedService), typeof(MessageBusStartupService));
+    }
+
+    [Fact]
+    public void SlimMessageBusHostedService_IsNotRegistered()
+    {
+        // The bus is started by MessageBusStartupService, after the migrations; SlimMessageBus's own hosted service
+        // would build it at host start.
+        using var factory = new RagWebApplicationFactory { UseRealServices = true, KeepHostedServices = true };
+        _ = factory.Services;
+
+        factory.ServiceDescriptors!
+            .Where(d => d.ServiceType == typeof(IHostedService))
+            .Select(d => d.ImplementationType?.FullName)
+            .Should().NotContain("SlimMessageBus.Host.MessageBusHostedService");
+    }
+
+    [Fact]
+    public void TransientServicesAndConsumers_ResolveWithoutBuildingTheMessageBus()
+    {
+        // Resolving the bus (IMessageBus / IConsumerControl) would provision its SQL tables, so it is not resolved here.
+        using var factory = NewFactory();
+        var sp = factory.Services;
+
+        sp.GetRequiredService<IIngestQueue>().Should().NotBeNull();
+        sp.GetRequiredService<IngestJobConsumer>().Should().NotBeNull();
+        sp.GetRequiredService<VectorIndexConsumer>().Should().NotBeNull();
     }
 
     [Fact]
