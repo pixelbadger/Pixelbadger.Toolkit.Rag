@@ -486,3 +486,6 @@ $RECYCLE.BIN/
 # Test assets and temporary files (committed test fixtures live in Pixelbadger.Toolkit.Rag.Tests/test-assets/)
 test-assets/
 !Pixelbadger.Toolkit.Rag.Tests/test-assets/
+
+# azd environments
+.azure/

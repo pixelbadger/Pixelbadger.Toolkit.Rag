@@ -19,6 +19,7 @@ public sealed class IngestWorker(
     IngestWorkerSignal signal,
     IngestJobRegistry registry,
     InFlightJobRecovery recovery,
+    IIngestKeepAlive keepAlive,
     ILogger<IngestWorker> logger) : BackgroundService
 {
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(60);
@@ -39,7 +40,7 @@ public sealed class IngestWorker(
                 consecutiveFailures = 0;
                 if (!processed)
                 {
-                    await EnsureVectorIndexIfStaleAsync(stoppingToken);
+                    await IdleAsync(stoppingToken);
                     await signal.WaitAsync(settings.PollInterval, stoppingToken);
                 }
             }
@@ -77,8 +78,21 @@ public sealed class IngestWorker(
         if (claim is null)
             return false;
 
+        // Before the work starts: a host that scales to zero must not stop while this job runs.
+        await keepAlive.MarkBusyAsync(cancellationToken);
+
         await RunJobAsync(scope.ServiceProvider, queue, claim, cancellationToken);
         return true;
+    }
+
+    /// <summary>
+    /// The queue is empty: build the vector index if needed, then let the host scale down (the worker loop calls this
+    /// whenever nothing was claimable).
+    /// </summary>
+    public async Task IdleAsync(CancellationToken cancellationToken)
+    {
+        await EnsureVectorIndexIfStaleAsync(cancellationToken);
+        await keepAlive.MarkIdleAsync(cancellationToken);
     }
 
     /// <summary>Builds the vector index if jobs indexed something since the last time (the worker loop calls this when the queue is idle).</summary>
@@ -212,6 +226,8 @@ public sealed class IngestWorker(
                 {
                     if (!await queue.ExtendLeaseAsync(jobId, _owner, settings.Lease, cancellationToken))
                         return true;
+                    // A long job outlives the keep-alive marker's time-to-live: refresh it (a no-op until it is due).
+                    await keepAlive.MarkBusyAsync(cancellationToken);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {

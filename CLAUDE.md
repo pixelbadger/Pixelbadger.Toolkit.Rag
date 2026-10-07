@@ -29,6 +29,7 @@ A .NET 10 ASP.NET Core app (minimal APIs, v3.x, shipped as a container) for Retr
 - Documents: **upload only** (`POST /api/documents`, batch allowed); the server never reads caller-named paths from its own disk. A document's id is a server-assigned `Guid` (v7) created with the upload; the *logical path* (the multipart filename) is metadata only and may repeat. One job = one file for one document; jobs live in SQL and are processed by a hosted worker.
 - **Single-instance assumption.** One instance owns a Lucene index directory (multi-instance is unsupported), and the code leans on it in three marked places: startup resets `Processing` jobs to `Queued` (`ResetInFlightJobsAsync`), `IngestJobRegistry` cancels in-process jobs on document delete, and `IndexWriteGate` serialises SQL+Lucene writes with deletes. If the app is ever scaled out, revisit all three (and rely on lease expiry instead of the reset).
 - Auth is out of scope.
+- Orchestration: .NET Aspire 13.6. `Pixelbadger.Toolkit.Rag.AppHost` runs SQL Server 2025 (container) + the app (project) locally, and publishes to Azure (`azd up` / `aspire deploy`): Azure SQL Database (free offer, bill overage; Entra ID via the app's managed identity) + the Dockerfile image on Azure Container Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, max 1 replica) with one Azure Files share at `/data` (index + model) and the `ingest-active` storage queue (ingest keep-alive). The app references `Pixelbadger.Toolkit.Rag.ServiceDefaults` (OpenTelemetry only).
 - Multimodal: each image / audio file is its own document. Video and images inside documents are out of scope.
 
 ## Quick Reference
@@ -45,6 +46,14 @@ export PBRAG_INDEX_PATH=./index
 
 # Run (http://localhost:8080 with the launch profile)
 dotnet run --project Pixelbadger.Toolkit.Rag
+
+# Or the whole stack under Aspire (SQL Server 2025 container + app + dashboard; needs Docker)
+dotnet user-secrets set Parameters:model-path ~/models/embeddinggemma-2-onnx --project Pixelbadger.Toolkit.Rag.AppHost
+dotnet run --project Pixelbadger.Toolkit.Rag.AppHost
+
+# Azure (Container Apps + Azure SQL); the postprovision hook uploads the model when PBRAG_MODEL_PATH is set
+azd up
+aspire publish -o ./aspire-output   # inspect the generated Bicep without deploying
 
 # Use it
 curl -F "files=@./guide.md;filename=docs/guide.md" http://localhost:8080/api/documents   # 202 + document ids
@@ -83,6 +92,7 @@ Pixelbadger.Toolkit.Rag/
 │   ├── DatabaseMigrationHostedService.cs # Runs migrations first (registered first), then InFlightJobRecoveryHostedService, then the worker
 │   ├── IngestRequestValidator.cs # Upload validation incl. safe logical paths
 │   ├── IngestWorkerSignal.cs   # In-process nudge so uploads are picked up immediately
+│   ├── IIngestKeepAlive.cs, QueueIngestKeepAlive.cs # Busy marker in a storage queue (scale-to-zero hosts stay up while jobs remain); no-op default
 │   └── IngestSettings.cs       # Rag:Ingest limits/timings
 ├── Mcp/
 │   ├── McpRagServer.cs         # MCP tool class (DI-resolved per call): Search
@@ -100,6 +110,10 @@ Pixelbadger.Toolkit.Rag/
 ├── Embeddings/                  # IEmbeddingService, Text/ (Gemma), Vision/, Audio/, Onnx/ (sessions, options)
 ├── Dtos/                        # SearchResult, IngestResult/IngestSource, IngestOptions
 └── Migrations/                  # EF Core migrations (InitialCreate, AddIngestQueue, DocumentGuidIdsAndFlatJobs)
+Pixelbadger.Toolkit.Rag.ServiceDefaults/ # Aspire service defaults, trimmed to OpenTelemetry (OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set)
+Pixelbadger.Toolkit.Rag.AppHost/ # Aspire AppHost: local orchestration + Azure (ACA + Azure SQL) publish
+azure.yaml, aspire.config.json   # azd project (postprovision hook -> scripts/upload-model.sh); Aspire CLI AppHost pointer
+scripts/upload-model.sh          # Uploads the local model to the ACA file share (/data/models/embeddinggemma-2-onnx)
 Dockerfile, .dockerignore        # Multi-stage image (aspnet:10.0 + ffmpeg); model and index are mounted
 tools/golden/                    # transformers.js scripts that generate golden fixtures from the real model
 ```
@@ -233,6 +247,17 @@ await act.Should().ThrowAsync<FileNotFoundException>();
 
 Ingester tests go through `PipelineHarness.IngestAsync(path)` (logical path = path relative to the content dir; creates a new document, or pass `documentId:` to re-ingest into one) or `Ingester.IngestAsync(new IngestSource(local, logical, documentId))` after `h.NewDocumentAsync(logical)` when the logical path matters.
 
+## Aspire / Azure
+
+- `AppHost.cs` branches on `builder.ExecutionContext.IsPublishMode`: run mode uses `AddProject` (debuggable, local `./index`, model from the `model-path` parameter); publish mode uses `AddDockerfile` (the root `Dockerfile`, so ffmpeg is there) with a `/data` volume and `Rag__ModelPath=/data/models/embeddinggemma-2-onnx`. Shared wiring (`WithReference(db)`, `Rag__ConnectionString`, `WaitFor`, health check) is in `WithRagDefaults`.
+- The database resource is `ragdb` (a resource cannot share the app's name `rag`). `WithReference(db)` is what grants the app identity `db_owner` in Azure; keep it.
+- Keep **one** volume on the container: with two, Aspire 13.6 gives both environment storages the same truncated name. The volume's mount options set uid/gid 1654 (the image's `app` user) and `nobrl`.
+- Azure SQL uses `Authentication="Active Directory Default"`; SqlClient 7 needs `Microsoft.Data.SqlClient.Extensions.Azure` for that (`Tests/Host/SqlAuthenticationTests` guards it).
+- Check infrastructure changes with `aspire publish -o <dir>` and read the generated Bicep (`rag/rag.bicep`, `env/env.bicep`, `sql/sql.bicep`).
+- Container Apps starts a new revision before stopping the old one, so a deploy briefly breaks the single-instance assumption (see Key decisions).
+- Scale to zero with the worker in-process: the worker calls `IIngestKeepAlive.MarkBusyAsync` after each claim (and from the job heartbeat) and `MarkIdleAsync` from `IdleAsync` (after the vector index build). `QueueIngestKeepAlive` keeps one visible marker message (TTL 2 h, refreshed every 30 min) in the `ingest-active` queue and clears the queue when idle; the ACA scale rules are `http` + `azureQueue` (`QueueLength = 1`, the app identity). It never throws (logs once per outage). Registered by `Program.cs` only when `ConnectionStrings:ingest-active` is set, otherwise `NoIngestKeepAlive`. The queue name is duplicated as a constant in `AppHost.cs` (the AppHost does not reference the app assembly).
+- Tests do not use the AppHost: SQL-backed tests start their own SQL Server via Testcontainers (Docker is the only requirement, as for Aspire locally).
+
 ## CI/CD
 
 ### GitHub Actions Workflows
@@ -248,7 +273,7 @@ The image is `ghcr.io/pixelbadger/pixelbadger.toolkit.rag` with tags `<Version f
 
 ### Version Requirements
 
-**IMPORTANT:** PRs that modify code in `Pixelbadger.Toolkit.Rag/` (excluding tests) MUST increment the version.
+**IMPORTANT:** PRs that modify code in `Pixelbadger.Toolkit.Rag/` or `Pixelbadger.Toolkit.Rag.ServiceDefaults/` (both ship in the image; excluding tests) MUST increment the version. AppHost-only changes do not.
 
 The CI runs `.github/scripts/check-version-increment.ps1` which:
 1. Reads `<Version>` from the `.csproj`

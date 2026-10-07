@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+# `azd up` provisions and deploys the Aspire AppHost (Azure SQL + Azure Container Apps). See README "Deploying to Azure".
+name: pixelbadger-toolkit-rag
+services:
+  app:
+    language: dotnet
+    project: ./Pixelbadger.Toolkit.Rag.AppHost/Pixelbadger.Toolkit.Rag.AppHost.csproj
+    host: containerapp
+hooks:
+  # Uploads the model to the app's file share when PBRAG_MODEL_PATH is set (skipped once it is there).
+  postprovision:
+    shell: sh
+    run: ./scripts/upload-model.sh --if-configured
