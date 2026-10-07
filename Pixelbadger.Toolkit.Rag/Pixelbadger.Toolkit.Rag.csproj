@@ -13,6 +13,11 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <!-- The React app (ClientApp/) is built by npm, never by MSBuild: keep node_modules and dist out of globbing. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);ClientApp/**</DefaultItemExcludes>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="Aspire.Azure.Storage.Queues" Version="13.6.0" />
     <PackageReference Include="Lucene.Net" Version="4.8.0-beta00018" />
