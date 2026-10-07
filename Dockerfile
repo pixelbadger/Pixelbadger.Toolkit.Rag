@@ -1,5 +1,13 @@
 # syntax=docker/dockerfile:1
 
+# React UI: built to /src/dist, copied into the runtime image's wwwroot (Node is not part of the final image).
+FROM node:22-alpine AS ui-build
+WORKDIR /src
+COPY Pixelbadger.Toolkit.Rag/ClientApp/package*.json ./
+RUN npm ci
+COPY Pixelbadger.Toolkit.Rag/ClientApp/ ./
+RUN npm run build
+
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
@@ -22,6 +30,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=build /app/publish .
+COPY --from=ui-build /src/dist ./wwwroot
 
 # The EmbeddingGemma 2 ONNX snapshot is NOT part of the image (the service never downloads models):
 # mount it read-only at /models/embeddinggemma-2-onnx (on Azure it lives on the /data volume).

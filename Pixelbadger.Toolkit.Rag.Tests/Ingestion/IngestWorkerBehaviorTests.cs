@@ -390,6 +390,7 @@ public abstract class IngestWorkerBehaviorTests
         public Task<IngestJobStatus> FailAsync(Guid jobId, string error, CancellationToken cancellationToken = default) => inner.FailAsync(jobId, error, cancellationToken);
         public Task<int> ResetInFlightJobsAsync(CancellationToken cancellationToken = default) => inner.ResetInFlightJobsAsync(cancellationToken);
         public Task<DocumentDto?> GetDocumentAsync(Guid documentId, CancellationToken cancellationToken = default) => inner.GetDocumentAsync(documentId, cancellationToken);
+        public Task<IngestJobPage> GetJobsAsync(int page, int pageSize, IngestJobStatus? status = null, CancellationToken cancellationToken = default) => inner.GetJobsAsync(page, pageSize, status, cancellationToken);
     }
 }
 

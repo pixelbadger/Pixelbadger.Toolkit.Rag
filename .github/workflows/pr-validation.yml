@@ -63,6 +63,29 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: Pixelbadger.Toolkit.Rag/ClientApp/package-lock.json
+
+    - name: UI install
+      working-directory: Pixelbadger.Toolkit.Rag/ClientApp
+      run: npm ci
+
+    - name: UI lint
+      working-directory: Pixelbadger.Toolkit.Rag/ClientApp
+      run: npm run lint
+
+    - name: UI test
+      working-directory: Pixelbadger.Toolkit.Rag/ClientApp
+      run: npm run test -- --run
+
+    - name: UI build
+      working-directory: Pixelbadger.Toolkit.Rag/ClientApp
+      run: npm run build
+
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:

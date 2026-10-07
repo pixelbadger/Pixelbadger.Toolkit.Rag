@@ -84,6 +84,9 @@ namespace Pixelbadger.Toolkit.Rag.Migrations
                         .IsRequired()
                         .HasColumnType("char(64)");
 
+                    b.Property<string>("ContentType")
+                        .HasColumnType("nvarchar(255)");
+
                     b.Property<Guid>("GlobalId")
                         .HasColumnType("uniqueidentifier");
 
@@ -92,6 +95,9 @@ namespace Pixelbadger.Toolkit.Rag.Migrations
 
                     b.Property<byte>("Modality")
                         .HasColumnType("tinyint");
+
+                    b.Property<byte[]>("SourceContent")
+                        .HasColumnType("varbinary(max)");
 
                     b.Property<string>("SourcePath")
                         .IsRequired()

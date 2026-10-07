@@ -135,6 +135,22 @@ public sealed class SqlDocumentStore : IDocumentStore
     }
 
     /// <inheritdoc />
+    public async Task<DocumentContent?> GetContentAsync(Guid documentId, CancellationToken cancellationToken = default)
+    {
+        await using var db = CreateContext();
+        var row = await db.Documents.AsNoTracking()
+            .Where(d => d.GlobalId == documentId && d.SourceContent != null)
+            .Select(d => new { d.SourceContent, d.ContentType, d.SourcePath })
+            .SingleOrDefaultAsync(cancellationToken);
+        return row is null
+            ? null
+            : new DocumentContent(
+                row.SourceContent!,
+                row.ContentType ?? MediaTypes.GetContentType(row.SourcePath) ?? "application/octet-stream",
+                Path.GetFileName(row.SourcePath));
+    }
+
+    /// <inheritdoc />
     public async Task<bool> DeleteDocumentAsync(Guid documentId, CancellationToken cancellationToken = default)
         => await WriteAsync(ct => DeleteCoreAsync(documentId, ct), cancellationToken);
 
@@ -192,19 +208,40 @@ public sealed class SqlDocumentStore : IDocumentStore
         await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
 
         // The document must exist: it is created when the upload is accepted, so a missing row means it was deleted
-        // while its job ran, and writing chunks now would resurrect it.
-        var doc = await db.Documents.FirstOrDefaultAsync(d => d.GlobalId == documentId, cancellationToken)
+        // while its job ran, and writing chunks now would resurrect it. Only the keys are read (not the stored source).
+        var doc = await db.Documents.AsNoTracking()
+            .Where(d => d.GlobalId == documentId)
+            .Select(d => new { d.DocumentId, d.GlobalId })
+            .FirstOrDefaultAsync(cancellationToken)
             ?? throw new DocumentNotFoundException(documentId);
 
         await db.Chunks.Where(c => c.DocumentId == doc.DocumentId).ExecuteDeleteAsync(cancellationToken);
 
-        doc.SourcePath = draft.SourcePath;
-        doc.Title = draft.Title;
-        doc.Modality = draft.Modality;
-        doc.ContentHash = draft.ContentHash;
-        doc.IndexStatus = IndexStatus.Indexed;
-        doc.UpdatedAtUtc = DateTime.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
+        // Same transaction as the chunk replacement below: the canonical source is always the indexed version.
+        var updatedAt = DateTime.UtcNow;
+        var update = db.Documents.Where(d => d.DocumentId == doc.DocumentId);
+        if (draft.SourceContent is { } sourceContent)
+        {
+            await update.ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.SourcePath, draft.SourcePath)
+                .SetProperty(d => d.Title, draft.Title)
+                .SetProperty(d => d.Modality, draft.Modality)
+                .SetProperty(d => d.ContentHash, draft.ContentHash)
+                .SetProperty(d => d.SourceContent, sourceContent)
+                .SetProperty(d => d.ContentType, draft.ContentType)
+                .SetProperty(d => d.IndexStatus, IndexStatus.Indexed)
+                .SetProperty(d => d.UpdatedAtUtc, updatedAt), cancellationToken);
+        }
+        else
+        {
+            await update.ExecuteUpdateAsync(s => s
+                .SetProperty(d => d.SourcePath, draft.SourcePath)
+                .SetProperty(d => d.Title, draft.Title)
+                .SetProperty(d => d.Modality, draft.Modality)
+                .SetProperty(d => d.ContentHash, draft.ContentHash)
+                .SetProperty(d => d.IndexStatus, IndexStatus.Indexed)
+                .SetProperty(d => d.UpdatedAtUtc, updatedAt), cancellationToken);
+        }
 
         var entities = new List<Chunk>(chunkDrafts.Count);
         foreach (var c in chunkDrafts.OrderBy(c => c.Ordinal))
@@ -229,7 +266,7 @@ public sealed class SqlDocumentStore : IDocumentStore
 
         return entities
             .Select(c => new ChunkRecord(
-                c.ChunkId, c.GlobalId, doc.DocumentId, doc.GlobalId, doc.SourcePath, doc.Title,
+                c.ChunkId, c.GlobalId, doc.DocumentId, doc.GlobalId, draft.SourcePath, draft.Title,
                 c.Ordinal, c.Modality, c.LocatorStart, c.LocatorEnd, c.ChunkText))
             .ToList();
     }

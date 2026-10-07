@@ -222,12 +222,10 @@ public sealed class SqlIngestQueue : IIngestQueue
         }
 
         await using (var touch = new SqlCommand(
-            $"UPDATE {DocumentsTableSql} SET SourcePath = @p, Title = @t, Modality = @mod, IndexStatus = @status, UpdatedAtUtc = @now WHERE DocumentId = @d",
+            // Path, title, modality and the canonical source stay those of the indexed version until the job succeeds.
+            $"UPDATE {DocumentsTableSql} SET IndexStatus = @status, UpdatedAtUtc = @now WHERE DocumentId = @d",
             connection, tx))
         {
-            touch.Parameters.AddWithValue("@p", logicalPath);
-            touch.Parameters.AddWithValue("@t", Path.GetFileName(logicalPath));
-            touch.Parameters.Add(new SqlParameter("@mod", SqlDbType.TinyInt) { Value = (byte)modality });
             touch.Parameters.Add(new SqlParameter("@status", SqlDbType.TinyInt) { Value = (byte)IndexStatus.Queued });
             touch.Parameters.AddWithValue("@now", now).SqlDbType = SqlDbType.DateTime2;
             touch.Parameters.AddWithValue("@d", documentKey);
@@ -506,5 +504,33 @@ public sealed class SqlIngestQueue : IIngestQueue
             ? new IngestJobDto(j.Id, j.Status, j.Attempts, j.CreatedAtUtc, j.StartedAtUtc, j.CompletedAtUtc, j.Error)
             : null;
         return new DocumentDto(row.GlobalId, row.SourcePath, row.Title, row.Modality, row.IndexStatus, row.ChunkCount, row.UpdatedAtUtc, latest);
+    }
+
+    /// <inheritdoc />
+    public async Task<IngestJobPage> GetJobsAsync(
+        int page, int pageSize, IngestJobStatus? status = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(page, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(pageSize, 1);
+
+        await using var db = CreateContext();
+
+        var jobs = db.IngestJobs.AsNoTracking();
+        if (status is { } s)
+            jobs = jobs.Where(j => j.Status == s);
+
+        var total = await jobs.CountAsync(cancellationToken);
+
+        // Projection leaves Content, the lease fields and the document's blobs/chunks out of the SELECT.
+        var items = await jobs
+            .OrderByDescending(j => j.CreatedAtUtc).ThenByDescending(j => j.Id)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .Select(j => new IngestJobListItemDto(
+                j.Id, j.Document!.GlobalId, j.LogicalPath, j.Status, j.Attempts, j.MaxChunkCharacters, j.SizeBytes,
+                j.ChunkCount, j.CreatedAtUtc, j.StartedAtUtc, j.CompletedAtUtc, j.Error))
+            .ToListAsync(cancellationToken);
+
+        return new IngestJobPage(items, page, pageSize, total);
     }
 }

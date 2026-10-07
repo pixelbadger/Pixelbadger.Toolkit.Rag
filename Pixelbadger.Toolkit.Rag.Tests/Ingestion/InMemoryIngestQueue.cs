@@ -229,6 +229,22 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         }
     }
 
+    public Task<IngestJobPage> GetJobsAsync(
+        int page, int pageSize, IngestJobStatus? status = null, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            var jobs = _docs.SelectMany(d => d.Jobs).Where(j => status is null || j.Status == status).ToList();
+            var items = jobs.OrderByDescending(j => j.Created).ThenByDescending(j => j.Id)
+                .Skip((page - 1) * pageSize).Take(pageSize)
+                .Select(j => new IngestJobListItemDto(
+                    j.Id, j.Doc.Id, j.Path, j.Status, j.Attempts, j.MaxChunk, j.Content?.Length ?? 0, j.ChunkCount,
+                    j.Created, j.Started, j.Completed, j.Error))
+                .ToList();
+            return Task.FromResult(new IngestJobPage(items, page, pageSize, jobs.Count));
+        }
+    }
+
     /// <summary>Simulates the SQL cascade of a document delete (the document and all its jobs vanish).</summary>
     public bool RemoveDocument(Guid documentId)
     {

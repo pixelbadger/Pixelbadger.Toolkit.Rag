@@ -324,8 +324,8 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         result.JobId.Should().NotBeNull().And.NotBe(created.JobId);
         var document = (await queue.GetDocumentAsync(created.DocumentId))!;
         document.IndexStatus.Should().Be(IndexStatus.Queued);
-        document.Path.Should().Be("docs/v2.txt");
-        document.Title.Should().Be("v2.txt");
+        document.Path.Should().Be("docs/v1.md", "path, title and modality follow the indexed version until the new job succeeds");
+        document.Title.Should().Be("v1.md");
         document.LatestJob!.JobId.Should().Be(result.JobId!.Value);
         document.LatestJob.Status.Should().Be(IngestJobStatus.Queued);
         (await ScalarAsync<int>(cs, $"SELECT COUNT(*) FROM dbo.IngestJobs WHERE DocumentId = (SELECT DocumentId FROM dbo.Documents WHERE GlobalId = '{created.DocumentId}')")).Should().Be(2);
@@ -346,7 +346,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs")).Should().Be(1, "no second job");
         (await ReadContentAsync(queue, created.JobId)).Should().Be("new bytes!");
         var document = (await queue.GetDocumentAsync(created.DocumentId))!;
-        document.Path.Should().Be("b.txt");
+        document.Path.Should().Be("a.md");
         document.Modality.Should().Be(Modality.Text);
         document.IndexStatus.Should().Be(IndexStatus.Queued);
         (await queue.TryClaimNextAsync("w", Lease)).Should().Be(new IngestJobClaim(created.JobId, created.DocumentId, 1, 200, "b.txt", 10));
@@ -440,5 +440,147 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         (await queue.GetDocumentAsync(other.DocumentId)).Should().NotBeNull();
         (await queue.TryClaimNextAsync("w", Lease))!.JobId.Should().Be(other.JobId);
         (await store.DeleteDocumentAsync(created.DocumentId)).Should().BeFalse();
+    }
+
+    // ---- job listing ----
+
+    [SkippableFact]
+    public async Task GetJobs_ReturnsNewestFirst_WithTheDocumentGuidOfEachJob()
+    {
+        var (queue, _) = await CreateAsync();
+        var first = await EnqueueOneAsync(queue, "first.txt", "1");
+        await Task.Delay(20);
+        var second = await EnqueueOneAsync(queue, "second.txt", "22");
+        await Task.Delay(20);
+        var third = await EnqueueOneAsync(queue, "third.txt", "333");
+
+        var page = await queue.GetJobsAsync(1, 25);
+
+        page.TotalCount.Should().Be(3);
+        page.Page.Should().Be(1);
+        page.PageSize.Should().Be(25);
+        page.Jobs.Select(j => j.JobId).Should().Equal(third.JobId, second.JobId, first.JobId);
+        page.Jobs.Select(j => j.DocumentId).Should().Equal(third.DocumentId, second.DocumentId, first.DocumentId);
+        page.Jobs.Select(j => j.Path).Should().Equal("third.txt", "second.txt", "first.txt");
+        var newest = page.Jobs[0];
+        newest.Status.Should().Be(IngestJobStatus.Queued);
+        newest.Attempts.Should().Be(0);
+        newest.MaxChunkCharacters.Should().Be(100);
+        newest.SizeBytes.Should().Be(3);
+        newest.ChunkCount.Should().BeNull();
+        newest.StartedAtUtc.Should().BeNull();
+        newest.CompletedAtUtc.Should().BeNull();
+        newest.Error.Should().BeNull();
+        newest.CreatedAtUtc.Kind.Should().Be(DateTimeKind.Utc);
+    }
+
+    [SkippableFact]
+    public async Task GetJobs_BreaksCreatedAtTies_ByIdDescending_AndPagesStably()
+    {
+        var (queue, cs) = await CreateAsync();
+        var created = await queue.EnqueueNewDocumentsAsync(
+            Enumerable.Range(0, 7).Select(i => Upload($"f{i}.txt", "x")).ToList(), 100);
+        await using (var conn = new SqlConnection(cs))
+        {
+            await conn.OpenAsync();
+            await using var cmd = new SqlCommand("UPDATE dbo.IngestJobs SET CreatedAtUtc = '2026-01-01T00:00:00'", conn);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var all = (await queue.GetJobsAsync(1, 100)).Jobs.Select(j => j.JobId).ToList();
+        var paged = new List<Guid>();
+        for (var p = 1; p <= 3; p++)
+            paged.AddRange((await queue.GetJobsAsync(p, 3)).Jobs.Select(j => j.JobId));
+
+        all.Should().BeEquivalentTo(created.Select(c => c.JobId));
+        paged.Should().Equal(all);
+        // Id DESC, as SQL Server orders uniqueidentifier.
+        (await GuidsAsync(cs, "SELECT Id FROM dbo.IngestJobs ORDER BY CreatedAtUtc DESC, Id DESC")).Should().Equal(all);
+    }
+
+    [SkippableFact]
+    public async Task GetJobs_Paginates_AndReportsTheTotalCount()
+    {
+        var (queue, _) = await CreateAsync();
+        var created = new List<EnqueuedDocument>();
+        for (var i = 0; i < 5; i++)
+        {
+            created.Add(await EnqueueOneAsync(queue, $"f{i}.txt", "x"));
+            await Task.Delay(20);
+        }
+
+        var page1 = await queue.GetJobsAsync(1, 2);
+        var page2 = await queue.GetJobsAsync(2, 2);
+        var page3 = await queue.GetJobsAsync(3, 2);
+        var page4 = await queue.GetJobsAsync(4, 2);
+
+        page1.Jobs.Select(j => j.JobId).Should().Equal(created[4].JobId, created[3].JobId);
+        page2.Jobs.Select(j => j.JobId).Should().Equal(created[2].JobId, created[1].JobId);
+        page3.Jobs.Select(j => j.JobId).Should().Equal(created[0].JobId);
+        page4.Jobs.Should().BeEmpty();
+        new[] { page1, page2, page3, page4 }.Should().OnlyContain(p => p.TotalCount == 5 && p.PageSize == 2);
+        page4.Page.Should().Be(4);
+    }
+
+    [SkippableFact]
+    public async Task GetJobs_FiltersByStatus_AndCountsOnlyMatches()
+    {
+        var (queue, _) = await CreateAsync();
+        var done = await EnqueueOneAsync(queue, "done.txt", "d");
+        await Task.Delay(20);
+        var failed = await EnqueueOneAsync(queue, "failed.txt", "f");
+        await Task.Delay(20);
+        await EnqueueOneAsync(queue, "waiting.txt", "w");
+        (await queue.TryClaimNextAsync("w", Lease))!.JobId.Should().Be(done.JobId);
+        await queue.CompleteAsync(done.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, ChunkCount: 4));
+        (await queue.TryClaimNextAsync("w", Lease))!.JobId.Should().Be(failed.JobId);
+        await queue.CompleteAsync(failed.JobId, new IngestJobOutcome(IngestJobStatus.Failed, Error: "bad file"));
+
+        var succeeded = await queue.GetJobsAsync(1, 25, IngestJobStatus.Succeeded);
+        var failedPage = await queue.GetJobsAsync(1, 25, IngestJobStatus.Failed);
+        var queued = await queue.GetJobsAsync(1, 25, IngestJobStatus.Queued);
+        var processing = await queue.GetJobsAsync(1, 25, IngestJobStatus.Processing);
+
+        succeeded.TotalCount.Should().Be(1);
+        var job = succeeded.Jobs.Single();
+        job.JobId.Should().Be(done.JobId);
+        job.DocumentId.Should().Be(done.DocumentId);
+        job.ChunkCount.Should().Be(4);
+        job.Attempts.Should().Be(1);
+        job.CompletedAtUtc.Should().NotBeNull();
+        failedPage.TotalCount.Should().Be(1);
+        failedPage.Jobs.Single().Error.Should().Be("bad file");
+        queued.Jobs.Single().Path.Should().Be("waiting.txt");
+        processing.TotalCount.Should().Be(0);
+        processing.Jobs.Should().BeEmpty();
+        (await queue.GetJobsAsync(1, 25)).TotalCount.Should().Be(3);
+    }
+
+    [SkippableFact]
+    public async Task GetJobs_DoesNotMaterialiseContent_AndKeepsSizeAfterTheBytesAreCleared()
+    {
+        var (queue, cs) = await CreateAsync();
+        var created = await EnqueueOneAsync(queue, "big.txt", new string('x', 5000));
+        (await queue.GetJobsAsync(1, 25)).Jobs.Single().SizeBytes.Should().Be(5000);
+
+        await queue.TryClaimNextAsync("w", Lease);
+        await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, ChunkCount: 1));
+
+        (await ScalarAsync<int>(cs, $"SELECT CASE WHEN Content IS NULL THEN 1 ELSE 0 END FROM dbo.IngestJobs WHERE Id = '{created.JobId}'")).Should().Be(1);
+        (await queue.GetJobsAsync(1, 25)).Jobs.Single().SizeBytes.Should().Be(5000);
+        // The listing DTO has no byte[] member, and the SQL projection selects only its fields.
+        typeof(IngestJobListItemDto).GetProperties().Select(p => p.PropertyType).Should().NotContain(typeof(byte[]));
+    }
+
+    private static async Task<List<Guid>> GuidsAsync(string cs, string query)
+    {
+        await using var conn = new SqlConnection(cs);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(query, conn);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        var values = new List<Guid>();
+        while (await reader.ReadAsync())
+            values.Add(reader.GetGuid(0));
+        return values;
     }
 }

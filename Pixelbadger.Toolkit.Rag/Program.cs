@@ -53,9 +53,12 @@ var app = builder.Build();
 
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+app.UseSpaStaticFiles();
+app.UseSpaFallback();
 
 app.MapHealthChecks("/health");
 app.MapDocumentEndpoints();
+app.MapJobEndpoints();
 app.MapQueryEndpoints();
 app.MapMcp("/mcp");
 

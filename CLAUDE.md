@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A .NET 10 ASP.NET Core app (minimal APIs, v4.x, shipped as a container) for Retrieval-Augmented Generation (RAG): **vector-only** search (SQL Server cosine similarity) over text, image and audio documents, embedded locally with EmbeddingGemma 2 (ONNX Runtime). Documents are created by multipart upload (`POST /api/documents`), which enqueues a background job per file in a persistent SQL queue; re-ingest and delete are REST too; query is a REST endpoint; MCP (Streamable HTTP at `/mcp`, `Search` tool only) is for AI assistants like Claude. There is no CLI, no stdio transport and no dotnet-tool packaging.
+A .NET 10 ASP.NET Core app (minimal APIs, v4.x, shipped as a container) for Retrieval-Augmented Generation (RAG): **vector-only** search (SQL Server cosine similarity) over text, image and audio documents, embedded locally with EmbeddingGemma 2 (ONNX Runtime). Documents are created by multipart upload (`POST /api/documents`), which enqueues a background job per file in a persistent SQL queue; re-ingest and delete are REST too; query is a REST endpoint; MCP (Streamable HTTP at `/mcp`, `Search` tool only) is for AI assistants like Claude. A React SPA (`ClientApp/`, built into `wwwroot` in the image) is served from the same origin at `/` (jobs dashboard), `/query` and `/ingest`. There is no CLI, no stdio transport and no dotnet-tool packaging.
 
 ### Architectural Boundary
 
@@ -28,6 +28,8 @@ A .NET 10 ASP.NET Core app (minimal APIs, v4.x, shipped as a container) for Retr
 - Search: vector only (cosine similarity over SQL). There is no BM25 / keyword / hybrid mode, no reranker, no search-mode option, no MCP `searchMode`. BM25 and RRF were removed in 4.0 because image/audio chunks could only score from one list and were under-ranked.
 - Documents: **upload only** (`POST /api/documents`, batch allowed); the server never reads caller-named paths from its own disk. A document's id is a server-assigned `Guid` (v7) created with the upload; the *logical path* (the multipart filename) is metadata only and may repeat. One job = one file for one document; jobs live in SQL and are processed by a hosted worker.
 - **Single-instance assumption.** One instance runs the ingest worker (multi-instance is unsupported), and the code leans on it in two marked places: startup resets `Processing` jobs to `Queued` (`ResetInFlightJobsAsync`), and `IngestJobRegistry` cancels in-process jobs on document delete. If the app is ever scaled out, revisit both (and rely on lease expiry instead of the reset).
+- **Canonical source.** A document's uploaded file is kept in `Documents.SourceContent` (+ `ContentType`) and served by `GET /api/documents/{id}/content`. It is written only by `IDocumentStore.ReplaceDocumentAsync`, in the same transaction as the chunk replacement (from `DocumentDraft.SourceContent`), so the source file, path/title/modality and the searchable chunks are always the same (successfully indexed) version. Re-ingest enqueue does not touch them; a failed job leaves them as they were. Job bytes are still NULLed when the job is terminal. Documents from before 4.1 have no source until re-uploaded.
+- **Browser UI.** React + TypeScript + Vite + Tailwind + shadcn-style components + TanStack Query, in `Pixelbadger.Toolkit.Rag/ClientApp` (excluded from the .NET build via `DefaultItemExcludes`). Same origin as the API (relative URLs only, no CORS); the Docker `ui-build` stage copies `dist` to `wwwroot`. `Api/SpaEndpoints.cs` serves static files and, for GET/HEAD with no matched endpoint, an extension-less path outside `/api`, `/mcp`, `/health`, returns `index.html` (a middleware, not `MapFallback`, so endpoints keep their 405/415 answers). No wwwroot -> those paths are 404.
 - Auth is out of scope.
 - Orchestration: .NET Aspire 13.6. `Pixelbadger.Toolkit.Rag.AppHost` runs SQL Server 2025 (container) + the app (project) locally, and publishes to Azure (`azd up` / `aspire deploy`): Azure SQL Database (free offer, bill overage; Entra ID via the app's managed identity) + the Dockerfile image on Azure Container Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, max 1 replica) with one Azure Files share at `/data` (model) and the `ingest-active` storage queue (ingest keep-alive). The app references `Pixelbadger.Toolkit.Rag.ServiceDefaults` (OpenTelemetry only).
 - Multimodal: each image / audio file is its own document. Video and images inside documents are out of scope.
@@ -59,9 +61,15 @@ curl -F "files=@./guide.md;filename=docs/guide.md" http://localhost:8080/api/doc
 curl http://localhost:8080/api/documents/<documentId>                                    # document + latest job status
 curl -X POST -F "files=@./guide.md;filename=docs/guide.md" http://localhost:8080/api/documents/<documentId>  # re-ingest (409 while processing)
 curl -X DELETE http://localhost:8080/api/documents/<documentId>                          # cancel job + delete
+curl -OJ http://localhost:8080/api/documents/<documentId>/content                        # indexed source file (?download=true -> attachment)
+curl 'http://localhost:8080/api/jobs?page=1&pageSize=25&status=Failed'                   # job history, newest first
 curl -X POST http://localhost:8080/api/query -H 'Content-Type: application/json' \
      -d '{"query":"search term","maxResults":5}'
-# MCP: http://localhost:8080/mcp (tool: Search)
+# MCP: http://localhost:8080/mcp (tool: Search); UI: http://localhost:8080/ (container image, or the Vite dev server below)
+
+# Browser UI (Node 22); the dev server proxies /api, /mcp, /health to http://localhost:8080 (PBRAG_DEV_API overrides)
+cd Pixelbadger.Toolkit.Rag/ClientApp && npm ci
+npm run dev | npm run lint | npm run test -- --run | npm run build   # build -> dist/
 
 # Container
 docker build -t pixelbadger-rag .
@@ -79,7 +87,9 @@ Pixelbadger.Toolkit.Rag/
 ├── Configuration/
 │   └── RagConfiguration.cs     # Binds/validates the `Rag` section (+ PBRAG_* fallbacks); RagConfigurationException
 ├── Api/                         # Minimal-API endpoints (thin: validate -> call service -> ProblemDetails)
-│   ├── DocumentEndpoints.cs    # POST /api/documents (batch), GET/POST/DELETE /api/documents/{id}
+│   ├── DocumentEndpoints.cs    # POST /api/documents (batch), GET/POST/DELETE /api/documents/{id}, GET /api/documents/{id}/content
+│   ├── JobEndpoints.cs         # GET /api/jobs (page, pageSize 1..100, status) -> IIngestQueue.GetJobsAsync
+│   ├── SpaEndpoints.cs         # wwwroot static files + SPA fallback middleware (never /api, /mcp, /health)
 │   ├── QueryEndpoints.cs       # POST /api/query
 │   └── ProblemExceptionHandler.cs # Unhandled exceptions -> generic 500 ProblemDetails
 ├── Ingestion/                   # Queue + worker
@@ -105,12 +115,13 @@ Pixelbadger.Toolkit.Rag/
 ├── Persistence/                 # IDocumentStore + EF Core SQL implementation, RagDbContext, SqlStoreOptions
 ├── Embeddings/                  # IEmbeddingService, Text/ (Gemma), Vision/, Audio/, Onnx/ (sessions, options)
 ├── Dtos/                        # SearchResult, IngestResult/IngestSource, IngestOptions
-└── Migrations/                  # EF Core migrations (InitialCreate, AddIngestQueue, DocumentGuidIdsAndFlatJobs)
+├── Migrations/                  # EF Core migrations (InitialCreate, AddIngestQueue, DocumentGuidIdsAndFlatJobs, DocumentSourceContent)
+└── ClientApp/                   # React SPA: src/api (fetch wrapper, types, content URL helpers), src/app (router, shell), src/components, src/pages (jobs, query, ingest), src/test (MSW)
 Pixelbadger.Toolkit.Rag.ServiceDefaults/ # Aspire service defaults, trimmed to OpenTelemetry (OTLP when OTEL_EXPORTER_OTLP_ENDPOINT is set)
 Pixelbadger.Toolkit.Rag.AppHost/ # Aspire AppHost: local orchestration + Azure (ACA + Azure SQL) publish
 azure.yaml, aspire.config.json   # azd project (postprovision hook -> scripts/upload-model.sh); Aspire CLI AppHost pointer
 scripts/upload-model.sh          # Uploads the local model to the ACA file share (/data/models/embeddinggemma-2-onnx)
-Dockerfile, .dockerignore        # Multi-stage image (aspnet:10.0 + ffmpeg); the model is mounted
+Dockerfile, .dockerignore        # Multi-stage image (node:22 UI build -> wwwroot, aspnet:10.0 + ffmpeg); the model is mounted
 tools/golden/                    # transformers.js scripts that generate golden fixtures from the real model
 ```
 
@@ -119,9 +130,9 @@ tools/golden/                    # transformers.js scripts that generate golden 
 | Interface | Purpose | Implementations |
 |-----------|---------|-----------------|
 | `IContentIngester` | Ingests one `IngestSource(LocalPath, LogicalPath, DocumentId)` into an existing document | `ContentIngester` |
-| `IIngestQueue` | Persistent document/job queue (create documents, re-ingest, claim, lease, complete, startup reset) | `SqlIngestQueue` |
+| `IIngestQueue` | Persistent document/job queue (create documents, re-ingest, claim, lease, complete, startup reset, paged job list) | `SqlIngestQueue` |
 | `ISearchService` | Vector search orchestration | `SearchService` |
-| `IDocumentStore` | SQL persistence + vector search + migrations | `SqlDocumentStore` |
+| `IDocumentStore` | SQL persistence (incl. canonical source read/write) + vector search + migrations | `SqlDocumentStore` |
 | `ITextChunker` | Text chunking | `ParagraphTextChunker`, `MarkdownTextChunker` |
 | `IFileReader` | Text file reading | `PlainTextFileReader`, `MarkdownFileReader` |
 | `IEmbeddingService` | Query / text / image / audio embeddings | `GemmaEmbeddingService` |
@@ -130,7 +141,7 @@ tools/golden/                    # transformers.js scripts that generate golden 
 
 ### Domain model
 
-- `Document`: int PK + unique `GlobalId` **Guid** (`Guid.CreateVersion7()`, assigned when the document is created at upload time; the id callers see and filter by). The row exists from POST time (status `Queued`, empty `ContentHash`) so the id can be returned; `SourcePath` / `Title` / `Modality` come from the latest upload. Uploading the same path twice makes two documents. `IndexStatus` (`Queued/Processing/Indexed/Failed`) follows the latest job.
+- `Document`: int PK + unique `GlobalId` **Guid** (`Guid.CreateVersion7()`, assigned when the document is created at upload time; the id callers see and filter by). The row exists from POST time (status `Queued`, empty `ContentHash`, no `SourceContent`) so the id can be returned; `SourcePath` / `Title` / `Modality` / `SourceContent` / `ContentType` are those of the latest *successfully indexed* upload (the first upload's path until then). Uploading the same path twice makes two documents. `IndexStatus` (`Queued/Processing/Indexed/Failed`) follows the latest job.
 - `Chunk` (table `dbo.Chunks_EG2_256`): int clustered PK, unique `GlobalId` Guid (shown to users as chunk id), `DocumentId` FK (cascade delete), ordinal, modality, locator range (chars for text, ms for audio, none for images), text (text chunks only), `vector(256)` embedding.
 - `IngestJob` (`dbo.IngestJobs`, one row per job, FK to the document with cascade delete): status (`Queued/Processing/Succeeded/Skipped/Failed`), attempts, lease owner/expiry, logical path, `varbinary(max)` content that is NULLed once the job is terminal, chunk count, error. Job history is kept; the document view shows the latest job. A document has at most one non-terminal job.
 
@@ -143,8 +154,8 @@ POST /api/documents/{id} -> EnqueueReingestAsync -> Created | ReplacedQueued (qu
 Startup: DatabaseMigrationHostedService -> InFlightJobRecoveryHostedService (Processing -> Queued; the worker repeats it before its first claim if SQL was down) -> IngestWorker
 IngestWorker: TryClaimNextAsync (lease, attempts++, document -> Processing) -> registry.Begin -> bytes -> temp file (original extension)
      -> IContentIngester.IngestAsync(IngestSource(temp, logical, documentId)): MediaTypes (extension) -> text: reader -> chunker | image: preprocess+encode | audio: ffmpeg windows+encode
-     -> IEmbeddingService -> IDocumentStore.ReplaceDocumentAsync (existing document only, one transaction)
-     -> CompleteAsync (result recorded, bytes NULLed, document status follows) -> when the queue is idle: EnsureVectorIndexAsync (>= 100 rows)
+     -> IEmbeddingService -> IDocumentStore.ReplaceDocumentAsync (existing document only, one transaction; also writes the file bytes as Document.SourceContent)
+     -> CompleteAsync (result recorded, job bytes NULLed, document status follows) -> when the queue is idle: EnsureVectorIndexAsync (>= 100 rows)
 ```
 
 **Delete:**
@@ -176,6 +187,8 @@ Query -> SearchService -> embed -> IDocumentStore.SearchAsync (n nearest, cosine
 - JSON enums are strings (`JsonStringEnumConverter` in `ConfigureHttpJsonOptions`).
 - The upload endpoints validate synchronously and reject the whole request on any violation (nothing created). Logical paths must be relative with plain segments (see `IngestRequestValidator.TryNormalizePath`) but need not be unique. The body-size limit is raised for those endpoints only. Re-ingest takes exactly one file; `409` while the document's job is processing; delete answers `409` when the running job does not stop within the cancel timeout.
 - The search filter is `documentIds` (Guids) in REST and MCP; both parse the strings with `DocumentIdFilter.Parse` (a bad value is a `400` / tool error naming it).
+- `GET /api/jobs` binds `page` / `pageSize` / `status` as strings and answers `ValidationProblem` for bad values (status: enum names only, case-insensitive). The SQL query projects to `IngestJobListItemDto` (never `Content`, leases or blobs), ordered `CreatedAtUtc DESC, Id DESC`.
+- `GET /api/documents/{id}/content` reads `IDocumentStore.GetContentAsync` (bytes from SQL only; never a path on disk), `inline` by default / `attachment` with `?download=true`, filename via `ContentDispositionHeaderValue`, range enabled, `nosniff`; `404` when unknown or no source.
 - Configuration is bound and validated once at startup by `RagConfiguration.Bind` (presence + model directory exists; never loads the model or opens SQL). Missing config exits with code 1 and a clear message. Add new settings there and to the README table.
 - API tests use `WebApplicationFactory<Program>` via `RagWebApplicationFactory` (settings go through `UseSetting`, because `Program` binds configuration eagerly).
 
@@ -215,6 +228,7 @@ Pixelbadger.Toolkit.Rag.Tests/
 ├── Persistence/           # SQL store integration tests (SqlServerFixture)
 ├── Pipeline/              # Ingester / search tests
 ├── Embeddings/            # Text, Vision, Audio unit tests
+├── Api/SpaHostingTests.cs # SPA fallback vs /api 404, /mcp, /health (temp web root)
 ├── Golden/                # Real-model golden tests (skipped unless PBRAG_MODEL_PATH is set)
 └── test-assets/golden/    # Fixtures generated by tools/golden
 ```
@@ -258,8 +272,8 @@ Ingester tests go through `PipelineHarness.IngestAsync(path)` (logical path = pa
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `pr-validation.yml` | PR to master | Build, test, build the container image (no push), validate the version bump |
-| `publish-container.yml` | Push to master (and manual, master only) | Build, test, then push the image to GHCR and tag `v<Version>` |
+| `pr-validation.yml` | PR to master | UI lint/test/build (Node 22), .NET build/test, build the container image (no push), validate the version bump |
+| `publish-container.yml` | Push to master (and manual, master only) | UI lint/test/build, .NET build/test, then push the image to GHCR and tag `v<Version>` |
 
 Both use `actions/setup-dotnet` with `10.0.x`. `ubuntu-latest` has Docker, so Testcontainers works. Tests run without `continue-on-error`: a failing test fails the job (and blocks publishing).
 
@@ -267,7 +281,7 @@ The image is `ghcr.io/pixelbadger/pixelbadger.toolkit.rag` with tags `<Version f
 
 ### Version Requirements
 
-**IMPORTANT:** PRs that modify code in `Pixelbadger.Toolkit.Rag/` or `Pixelbadger.Toolkit.Rag.ServiceDefaults/` (both ship in the image; excluding tests) MUST increment the version. AppHost-only changes do not.
+**IMPORTANT:** PRs that modify code in `Pixelbadger.Toolkit.Rag/` (including `ClientApp/`) or `Pixelbadger.Toolkit.Rag.ServiceDefaults/` (both ship in the image; excluding tests) MUST increment the version. AppHost-only changes do not.
 
 The CI runs `.github/scripts/check-version-increment.ps1` which:
 1. Reads `<Version>` from the `.csproj`

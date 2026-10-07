@@ -70,7 +70,8 @@ public sealed class InMemoryDocumentStore : IDocumentStore
             if (!_documents.TryGetValue(documentId, out var existing))
                 throw new DocumentNotFoundException(documentId);
 
-            _documents[documentId] = (existing.Id, document, IndexStatus.Indexed);
+            // Like the SQL store: a draft without bytes leaves the stored source alone.
+            _documents[documentId] = (existing.Id, document.SourceContent is null ? document with { SourceContent = existing.Draft.SourceContent, ContentType = existing.Draft.ContentType } : document, IndexStatus.Indexed);
             _rows.RemoveAll(r => r.Record.DocumentId == existing.Id);
 
             var records = new List<ChunkRecord>();
@@ -84,6 +85,17 @@ public sealed class InMemoryDocumentStore : IDocumentStore
             }
 
             return Task.FromResult<IReadOnlyList<ChunkRecord>>(records);
+        }
+    }
+
+    public Task<DocumentContent?> GetContentAsync(Guid documentId, CancellationToken cancellationToken = default)
+    {
+        lock (_gate)
+        {
+            if (!_documents.TryGetValue(documentId, out var d) || d.Draft.SourceContent is null)
+                return Task.FromResult<DocumentContent?>(null);
+            return Task.FromResult<DocumentContent?>(new DocumentContent(
+                d.Draft.SourceContent, d.Draft.ContentType ?? "application/octet-stream", Path.GetFileName(d.Draft.SourcePath)));
         }
     }
 
