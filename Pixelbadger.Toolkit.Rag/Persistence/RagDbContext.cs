@@ -95,8 +95,6 @@ public sealed class RagDbContext : DbContext
             e.Property(j => j.CreatedAtUtc).HasColumnType("datetime2").HasConversion(UtcConverter);
             e.Property(j => j.StartedAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
             e.Property(j => j.CompletedAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
-            e.Property(j => j.LeaseExpiresAtUtc).HasColumnType("datetime2").HasConversion(NullableUtcConverter);
-            e.Property(j => j.LeaseOwner).HasColumnType("nvarchar(128)");
             e.HasIndex(j => new { j.Status, j.CreatedAtUtc }).HasDatabaseName("IX_IngestJobs_Status_CreatedAtUtc");
             e.HasIndex(j => new { j.DocumentId, j.CreatedAtUtc }).HasDatabaseName("IX_IngestJobs_Document_CreatedAtUtc");
         });

@@ -16,7 +16,6 @@ public class SqlPipelineIntegrationTests(SqlServerFixture sql) : PipelineBehavio
         var connectionString = await sql.CreateDatabaseAsync();
         var options = new SqlStoreOptions { ConnectionString = connectionString };
         var store = new SqlDocumentStore(options);
-        var queue = new SqlIngestQueue(options, new IngestSettings());
 
         try
         {
@@ -26,6 +25,8 @@ public class SqlPipelineIntegrationTests(SqlServerFixture sql) : PipelineBehavio
         {
             Skip.If(true, "SqlDocumentStore is not implemented yet (workstream D); run after integration.");
         }
+
+        var queue = await TestIngestQueue.CreateAsync(connectionString);
 
         // The upload endpoint creates the document row (and its queued job) before the worker ingests into it.
         return new StoreUnderTest(store, async path =>
