@@ -7,6 +7,7 @@ An ASP.NET Core service for retrieval-augmented generation (RAG). Upload text, i
 - **Multimodal.** Text (`.txt`, `.md`), images and audio are each ingested as their own documents and searched together.
 - **Document-centric REST.** `POST /api/documents` uploads one or more files and returns `202` with a server-assigned document id per file; a background worker processes each file from a persistent SQL queue (it survives restarts) and you poll `GET /api/documents/{id}`. Re-ingest a document with `POST /api/documents/{id}`, delete it with `DELETE /api/documents/{id}`.
 - **MCP server.** `/mcp` exposes a single `Search` tool over Streamable HTTP. Uploading and deleting are REST-only.
+- **Browser UI.** The service serves a small React app at `/` (same origin as the API): a live jobs dashboard (`/`), a query page that shows the ranked chunks with links back to each source file (`/query`), and an upload page (`/ingest`). It is an operational UI over the REST API, not a chat interface.
 
 > **Version 3.0 is a breaking change from 2.x.** The `pbrag` CLI, the stdio MCP transport and the dotnet-tool package are gone: the application is now a web service shipped as a container image (on GHCR). Ingest is upload-only (the server never reads caller-named paths from its own disk, so `--content-path`, folder ingestion, `--allow-symlinks` and `--max-files` no longer exist), `pbrag query` became `POST /api/query`, and `pbrag serve` became `/mcp`. Configuration moved from command-line options to the `Rag` configuration section (the `PBRAG_*` variables still work as fallbacks). Documents are no longer identified by their path: each upload creates a document with a **server-assigned GUID id**, the path is only metadata (the same path uploaded twice is two documents), and the search filter `sourceIds` became `documentIds` (GUIDs). 2.0 was itself a breaking change from 1.x (OpenAI embeddings and SQLite-vec removed, hybrid-only search).
 >
@@ -78,7 +79,7 @@ Audio ingestion decodes files with `ffmpeg` (16 kHz mono). Install it and make s
 
 ### Docker
 
-Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`3.0.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string and a volume for the Lucene index.
+Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`3.2.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string and a volume for the Lucene index.
 
 ```bash
 docker pull ghcr.io/pixelbadger/pixelbadger.toolkit.rag:latest
@@ -91,6 +92,8 @@ docker run -d --name pbrag -p 8080:8080 \
 
 curl http://localhost:8080/health
 ```
+
+Open `http://localhost:8080/` for the browser UI (`/` jobs, `/query`, `/ingest`).
 
 To build the image yourself instead: `docker build -t pixelbadger-rag .`.
 
@@ -120,6 +123,8 @@ export PBRAG_INDEX_PATH=./index
 
 dotnet run --project Pixelbadger.Toolkit.Rag --urls http://localhost:8080
 ```
+
+Running from source serves the API only, unless `Pixelbadger.Toolkit.Rag/wwwroot` holds a built UI; for UI work run the Vite dev server alongside it (see [Development and testing](#development-and-testing)).
 
 The service refuses to start (with a clear message and exit code 1) when the index path, connection string or model path is missing, or the model directory does not exist. Validation never loads the model or connects to SQL.
 
@@ -192,9 +197,12 @@ Errors are [RFC 9457 problem details](https://www.rfc-editor.org/rfc/rfc9457) (`
 | `GET` | `/api/documents/{id}` | A document with the status of its latest job. |
 | `POST` | `/api/documents/{id}` | Re-ingest a document with a new version of its file. |
 | `DELETE` | `/api/documents/{id}` | Cancel the document's active job and delete the document. |
+| `GET` | `/api/documents/{id}/content` | The document's source file (the version that is currently indexed). |
+| `GET` | `/api/jobs` | Ingest jobs, newest first, paginated and filterable by status. |
 | `POST` | `/api/query` | Hybrid search. |
 | any | `/mcp` | MCP Streamable HTTP (`Search` tool). |
 | `GET` | `/health` | Liveness (touches neither SQL nor the model). |
+| `GET` | `/`, `/query`, `/ingest` | Browser UI (any other extension-less path outside `/api`, `/mcp` and `/health` also returns the app; unknown `/api/*` routes stay `404`). |
 
 ### Documents
 
@@ -223,7 +231,7 @@ Each document has a series of ingest jobs; one job is one file for one document.
 
 - `indexStatus`: `Queued`, `Processing`, `Indexed` or `Failed`; it follows the latest job. `chunkCount` is the number of searchable chunks right now (the previous version stays searchable while a re-ingest is queued).
 - `latestJob.status`: `Queued`, `Processing`, `Succeeded`, `Skipped` (the file had no content, so no chunks), or `Failed` (see `error`; a problem with the file is recorded once, an infrastructure failure is retried up to `MaxAttempts` times).
-- Uploaded bytes are stored in SQL until the job finishes and are then discarded; the job history is kept.
+- Uploaded bytes are stored on the job until it finishes and are then discarded from it; the job history is kept. When a job **succeeds** (or is `Skipped`), its bytes become the document's **canonical source**, in the same SQL transaction that replaces the document's chunks, so the downloadable file and the searchable chunks are always the same version. `path`, `title` and `modality` also change only then. A failed job leaves the previous source, metadata and chunks as they were.
 - A worker crash or restart is safe: the job is put back in the queue (at startup, or when its lease expires) and processed again.
 
 #### Create documents (batch)
@@ -245,7 +253,7 @@ curl http://localhost:8080/api/documents/0f8fad5b-d9cb-469f-a165-70867728950e
 
 #### Re-ingest a document
 
-`POST /api/documents/{id}` with exactly one `files` part (`400` otherwise) uploads a new version. It is a `POST`, not a `PUT`, because it queues a job rather than replacing the document immediately. The file's name becomes the document's new path.
+`POST /api/documents/{id}` with exactly one `files` part (`400` otherwise) uploads a new version. It is a `POST`, not a `PUT`, because it queues a job rather than replacing the document immediately. The file's name becomes the document's new path once the new version has been indexed; until then the document (its path, chunks and source file) stays the previous version.
 
 ```bash
 curl -i -X POST http://localhost:8080/api/documents/0f8fad5b-d9cb-469f-a165-70867728950e \
@@ -263,6 +271,55 @@ curl -i -X DELETE http://localhost:8080/api/documents/0f8fad5b-d9cb-469f-a165-70
 ```
 
 Cancels the document's active job (queued or running; a running one is stopped and awaited), then deletes the document: its SQL rows (chunks and jobs) and its Lucene entries. `204` on success, `404` for an unknown id, `409` if the running job did not stop within `Rag:Ingest:CancelTimeoutSeconds` (nothing is deleted; retry).
+
+#### Download a document's source
+
+```bash
+curl -OJ http://localhost:8080/api/documents/0f8fad5b-d9cb-469f-a165-70867728950e/content
+```
+
+Returns the bytes of the version that is currently indexed, read from SQL, with its media type (`text/markdown`, `image/png`, `audio/mpeg`, ...) and `Content-Disposition: inline; filename="guide.md"` (the last segment of the document's path). `?download=true` makes it `attachment`. Range requests are supported (audio seeking). `404` when the document does not exist or has never been ingested successfully, including documents uploaded before 3.2 (re-upload them to make their source available).
+
+### Jobs
+
+```bash
+curl 'http://localhost:8080/api/jobs?page=1&pageSize=25&status=Failed'
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `page` | 1 | 1-based page number. |
+| `pageSize` | 25 | 1 to 100. |
+| `status` | | Optional filter: `Queued`, `Processing`, `Succeeded`, `Skipped` or `Failed` (case-insensitive). |
+
+Jobs are ordered newest first (`createdAtUtc`, then job id). Invalid parameters return a `400` validation problem.
+
+```json
+{
+  "jobs": [
+    {
+      "jobId": "019a0c1e-...",
+      "documentId": "019a0c1e-...",
+      "path": "docs/guide.md",
+      "status": "Succeeded",
+      "attempts": 1,
+      "maxChunkCharacters": 20000,
+      "sizeBytes": 48321,
+      "chunkCount": 12,
+      "createdAtUtc": "2026-10-07T00:00:00Z",
+      "startedAtUtc": "2026-10-07T00:00:01Z",
+      "completedAtUtc": "2026-10-07T00:00:04Z",
+      "error": null
+    }
+  ],
+  "page": 1,
+  "pageSize": 25,
+  "totalCount": 137,
+  "totalPages": 6
+}
+```
+
+`path` and `chunkCount` are the job's own (its uploaded path and the chunks it produced), not the document's current values. File contents and lease details are never returned.
 
 ### Query
 
@@ -334,7 +391,8 @@ Ingest:  POST /api/documents (multipart) -> validate -> SQL: Document (Queued) +
               image: decode -> patchify -> vision encoder -> EmbeddingGemma 2
               audio: ffmpeg -> log-mel windows -> audio encoder -> EmbeddingGemma 2
           -> SQL Server (Chunk + vector(256), replacing the document's chunks) -> Lucene (text chunks, keyed by chunk id)
-         -> job done (bytes discarded) -> vector index built once the queue is idle
+          (the same SQL transaction makes the job's bytes the document's canonical source)
+         -> job done (bytes discarded from the job) -> vector index built once the queue is idle
 Delete:  DELETE /api/documents/{id} -> cancel the running job and wait -> delete SQL rows (cascade) + Lucene entries
 
 Search:  query -> [Lucene BM25 top-N | SQL vector top-N] -> RRF (k = 60) -> hydrate from SQL -> results
@@ -348,7 +406,9 @@ Search:  query -> [Lucene BM25 top-N | SQL vector top-N] -> RRF (k = 60) -> hydr
 
 **Job queue.** `dbo.IngestJobs` holds the queue: one row per job, linked to its document (a document delete cascades to its jobs). A hosted worker claims the oldest claimable job with an atomic `UPDATE ... WITH (UPDLOCK, READPAST)` that also sets a lease; the lease is renewed while the job runs, and an expired lease makes the job claimable again until `MaxAttempts` is reached. At startup (after migrations, before the worker claims anything) jobs left `Processing` by the previous process are requeued. Deleting a document cancels its running job through an in-process registry and waits for the worker to let go before removing anything; a job whose document disappears meanwhile stops quietly.
 
-**Privacy.** Chunk text and document paths are stored in SQL Server in plaintext. Protect the database and avoid ingesting secrets unless that is acceptable.
+**Browser UI.** `Pixelbadger.Toolkit.Rag/ClientApp` is a React + TypeScript app (Vite, Tailwind, shadcn/ui components, TanStack Query). The container build compiles it in a Node stage and copies it into the image's `wwwroot`; ASP.NET serves it from the same origin as the API, so there is no CORS and no API URL to configure.
+
+**Privacy.** Chunk text, document paths and the uploaded source files are stored in SQL Server in plaintext. Protect the database and avoid ingesting secrets unless that is acceptable.
 
 ## Development and testing
 
@@ -357,11 +417,22 @@ dotnet build
 dotnet test
 ```
 
+Browser UI (Node 22):
+
+```bash
+cd Pixelbadger.Toolkit.Rag/ClientApp
+npm ci
+npm run dev            # Vite dev server; proxies /api, /mcp and /health to http://localhost:8080 (run the service there)
+npm run lint
+npm run test -- --run  # Vitest + Testing Library + MSW
+npm run build          # type-check and build into dist/
+```
+
 - Tests use **xUnit, FluentAssertions and Moq**. SQL-backed tests (store, pipeline, ingest queue, worker) run against a SQL Server 2025 container started by **Testcontainers** (Docker required; shared via the `SqlServer` collection fixture).
 - To reuse an existing SQL Server instead of starting a container, set `PBRAG_TEST_SQL_CONNECTION_STRING` to its connection string. The tests do not use the Aspire AppHost: they start their own container, so the only local requirement is Docker, as for Aspire.
 - API and MCP tests host the real application in-process with `WebApplicationFactory<Program>` (mocked search service, queue and store, no worker, no SQL, no model).
 - Embedding-dependent tests use a deterministic mock embedding service. **Golden tests** that compare against the real ONNX model run only when `PBRAG_MODEL_PATH` points at a local model; otherwise they are skipped. Reference vectors are generated with the transformers.js scripts in [`tools/golden`](tools/golden).
-- CI (`.github/workflows`) runs on .NET 10. Pull requests build and test, build the container image without pushing it and, when they change `Pixelbadger.Toolkit.Rag/`, require `<Version>` to be higher than the latest `v*` git tag. A merge to `master` builds, tests and pushes the image to GHCR (tags `<Version>`, `latest`, `sha-<short>`), then creates the `v<Version>` tag; the push is refused if that tag already exists, so bump `<Version>` for every release. The registry login uses the built-in `GITHUB_TOKEN`.
+- CI (`.github/workflows`) runs on .NET 10 and Node 22. Pull requests lint, test and build the UI, build and test the .NET solution, build the container image without pushing it and, when they change `Pixelbadger.Toolkit.Rag/`, require `<Version>` to be higher than the latest `v*` git tag. A merge to `master` builds, tests and pushes the image to GHCR (tags `<Version>`, `latest`, `sha-<short>`), then creates the `v<Version>` tag; the push is refused if that tag already exists, so bump `<Version>` for every release. The registry login uses the built-in `GITHUB_TOKEN`.
 
 ## Evaluations
 
