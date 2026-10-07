@@ -1,22 +1,23 @@
 using System.Data;
-using System.Data.Common;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Pixelbadger.Toolkit.Rag.Domain;
+using Pixelbadger.Toolkit.Rag.Messaging;
 using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Ingestion;
 
 /// <summary>
 /// <see cref="IIngestQueue"/> on SQL Server (EF Core for the simple operations, raw SQL where locking or atomicity
-/// matters). The claim uses <c>UPDLOCK, READPAST</c> so concurrent claimers skip each other's rows instead of
-/// blocking or double-claiming.
+/// matters). Every status change runs in a <see cref="JobEventTransaction"/>, so the <see cref="JobStatusChanged"/>
+/// event that drives the work is committed (or rolled back) together with the write itself.
 /// </summary>
 /// <remarks>
-/// Lock order everywhere is job row first, then document row (complete, fail, reset, re-ingest, and the document
-/// delete in <see cref="SqlDocumentStore"/>; the claim touches the two in separate statements). Within the jobs table,
-/// though, the re-ingest lookup (via the DocumentId index) and the claim (via the Status index) can still take index
-/// locks in opposite orders and deadlock; the re-ingest transaction is therefore retried when it is the victim.
+/// Lock order everywhere is job row first, then document row (begin processing, complete, re-ingest, and the
+/// document delete in <see cref="SqlDocumentStore"/>). Within the jobs table, though, the re-ingest lookup (via the
+/// DocumentId index) and <see cref="BeginProcessingAsync"/> (via the primary key) can still take index locks in
+/// opposite orders and deadlock; the re-ingest transaction is therefore retried when it is the victim.
 /// </remarks>
 public sealed class SqlIngestQueue : IIngestQueue
 {
@@ -24,21 +25,23 @@ public sealed class SqlIngestQueue : IIngestQueue
     private const string DocumentsTableSql = "dbo." + RagDbContext.DocumentsTable;
 
     private readonly string _connectionString;
-    private readonly IngestSettings _settings;
+    private readonly IServiceScopeFactory _scopes;
     private readonly DbContextOptions<RagDbContext> _dbOptions;
 
-    public SqlIngestQueue(SqlStoreOptions sql, IngestSettings settings)
+    public SqlIngestQueue(SqlStoreOptions sql, IngestSettings settings, IServiceScopeFactory scopes)
     {
         ArgumentNullException.ThrowIfNull(sql);
         ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(scopes);
         if (string.IsNullOrWhiteSpace(sql.ConnectionString))
             throw new ArgumentException("A SQL Server connection string is required.", nameof(sql));
 
         _connectionString = sql.ConnectionString;
-        _settings = settings;
+        _scopes = scopes;
         _dbOptions = new DbContextOptionsBuilder<RagDbContext>().UseSqlServer(sql.ConnectionString).Options;
     }
 
+    // Reads (listing, content) use their own connections; every write goes through a JobEventTransaction.
     private RagDbContext CreateContext() => new(_dbOptions);
 
     /// <inheritdoc />
@@ -47,8 +50,8 @@ public sealed class SqlIngestQueue : IIngestQueue
     {
         ArgumentNullException.ThrowIfNull(uploads);
 
-        await using var db = CreateContext();
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await using var tx = await JobEventTransaction.BeginAsync(_scopes, cancellationToken);
+        await using var db = tx.CreateDbContext();
 
         var created = new List<EnqueuedDocument>(uploads.Count);
         // One file at a time, detached after each insert, so only one file's bytes are in memory at once.
@@ -84,10 +87,11 @@ public sealed class SqlIngestQueue : IIngestQueue
             db.Entry(job).State = EntityState.Detached;
             db.Entry(document).State = EntityState.Detached;
 
+            await tx.PublishAsync(job.Id, IngestJobStatus.Queued, cancellationToken);
             created.Add(new EnqueuedDocument(document.GlobalId, job.Id));
         }
 
-        await transaction.CommitAsync(cancellationToken);
+        await tx.CommitAsync();
         return created;
     }
 
@@ -103,17 +107,16 @@ public sealed class SqlIngestQueue : IIngestQueue
 
         for (var attempt = 1; ; attempt++)
         {
-            await using var connection = new SqlConnection(_connectionString);
-            await connection.OpenAsync(cancellationToken);
-            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+            // A new transaction (and outbox scope) per attempt: a deadlock victim's transaction is gone.
+            await using var tx = await JobEventTransaction.BeginAsync(_scopes, cancellationToken);
 
             try
             {
-                var result = await ReingestCoreAsync(connection, transaction, documentId, upload.LogicalPath, modality, content, maxChunkCharacters, cancellationToken);
+                var result = await ReingestCoreAsync(tx, documentId, upload.LogicalPath, modality, content, maxChunkCharacters, cancellationToken);
                 if (result.Outcome is ReingestOutcome.Created or ReingestOutcome.ReplacedQueued)
-                    await transaction.CommitAsync(cancellationToken);
+                    await tx.CommitAsync();
                 else
-                    await transaction.RollbackAsync(cancellationToken);
+                    await tx.RollbackAsync();
                 return result;
             }
             catch (SqlException ex) when (ex.Number == 547)
@@ -123,8 +126,8 @@ public sealed class SqlIngestQueue : IIngestQueue
             }
             catch (SqlException ex) when (ex.Number == DeadlockVictimError && attempt < MaxDeadlockAttempts)
             {
-                // Chosen as deadlock victim against a claim (see remarks): SQL Server has rolled the whole transaction
-                // back, so rerunning it is safe and then sees the job's real state (Conflict or ReplacedQueued).
+                // Chosen as deadlock victim against BeginProcessingAsync (see remarks): SQL Server has rolled the whole
+                // transaction back, so rerunning it is safe and then sees the job's real state (Conflict or ReplacedQueued).
                 await Task.Delay(Random.Shared.Next(20, 100 * attempt), cancellationToken);
             }
         }
@@ -133,9 +136,8 @@ public sealed class SqlIngestQueue : IIngestQueue
     private const int DeadlockVictimError = 1205;
     private const int MaxDeadlockAttempts = 5;
 
-    private async Task<ReingestResult> ReingestCoreAsync(
-        SqlConnection connection,
-        DbTransaction transaction,
+    private static async Task<ReingestResult> ReingestCoreAsync(
+        JobEventTransaction tx,
         Guid documentId,
         string logicalPath,
         Modality modality,
@@ -143,11 +145,12 @@ public sealed class SqlIngestQueue : IIngestQueue
         int maxChunkCharacters,
         CancellationToken ct)
     {
-        var tx = (SqlTransaction)transaction;
+        var connection = tx.Connection;
+        var transaction = tx.Transaction;
 
         // Serialises concurrent re-ingests of the SAME document (an application lock, so no row-lock order to worry
         // about): without it two of them could both see "no active job" and both insert one. Released on commit/rollback.
-        await using (var applock = new SqlCommand("EXEC @result = sp_getapplock @Resource = @resource, @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000", connection, tx))
+        await using (var applock = new SqlCommand("EXEC @result = sp_getapplock @Resource = @resource, @LockMode = N'Exclusive', @LockOwner = N'Transaction', @LockTimeout = 30000", connection, transaction))
         {
             applock.Parameters.AddWithValue("@resource", "pbrag:reingest:" + documentId.ToString("N"));
             var result = applock.Parameters.Add(new SqlParameter("@result", SqlDbType.Int) { Direction = ParameterDirection.Output });
@@ -157,7 +160,7 @@ public sealed class SqlIngestQueue : IIngestQueue
         }
 
         int documentKey;
-        await using (var find = new SqlCommand($"SELECT DocumentId FROM {DocumentsTableSql} WHERE GlobalId = @g", connection, tx))
+        await using (var find = new SqlCommand($"SELECT DocumentId FROM {DocumentsTableSql} WHERE GlobalId = @g", connection, transaction))
         {
             find.Parameters.AddWithValue("@g", documentId);
             if (await find.ExecuteScalarAsync(ct) is not int key)
@@ -166,13 +169,13 @@ public sealed class SqlIngestQueue : IIngestQueue
         }
 
         // Lock the document's non-terminal job (or, when there is none, the key range where one would be inserted)
-        // so a claim, a concurrent re-ingest or a delete cannot slip in between this look and the write below. A
-        // claim in flight holds the row, so this waits for it and then sees Processing.
+        // so a begin-processing, a concurrent re-ingest or a delete cannot slip in between this look and the write
+        // below. A begin-processing in flight holds the row, so this waits for it and then sees Processing.
         Guid? activeJobId = null;
         IngestJobStatus? activeStatus = null;
         await using (var look = new SqlCommand(
             $"SELECT TOP (1) Id, Status FROM {JobsTableSql} WITH (UPDLOCK, HOLDLOCK) " +
-            "WHERE DocumentId = @d AND Status IN (@queued, @processing) ORDER BY Status DESC, CreatedAtUtc DESC, Id DESC", connection, tx))
+            "WHERE DocumentId = @d AND Status IN (@queued, @processing) ORDER BY Status DESC, CreatedAtUtc DESC, Id DESC", connection, transaction))
         {
             look.Parameters.AddWithValue("@d", documentKey);
             look.Parameters.AddWithValue("@queued", (int)IngestJobStatus.Queued);
@@ -196,12 +199,12 @@ public sealed class SqlIngestQueue : IIngestQueue
             // New bytes mean a fresh start: attempts and the last error belonged to the content being replaced.
             await using var replace = new SqlCommand(
                 $"UPDATE {JobsTableSql} SET Content = @c, LogicalPath = @p, SizeBytes = @s, MaxChunkCharacters = @m, Attempts = 0, Error = NULL " +
-                "WHERE Id = @id AND Status = @queued", connection, tx);
+                "WHERE Id = @id AND Status = @queued", connection, transaction);
             AddContentParameters(replace, content, logicalPath, maxChunkCharacters);
             replace.Parameters.AddWithValue("@id", queuedId);
             replace.Parameters.AddWithValue("@queued", (int)IngestJobStatus.Queued);
             if (await replace.ExecuteNonQueryAsync(ct) == 0)
-                return new ReingestResult(ReingestOutcome.Conflict); // claimed in the meantime
+                return new ReingestResult(ReingestOutcome.Conflict); // picked up in the meantime
 
             jobId = queuedId;
             outcome = ReingestOutcome.ReplacedQueued;
@@ -211,7 +214,7 @@ public sealed class SqlIngestQueue : IIngestQueue
             jobId = Guid.CreateVersion7();
             await using var insert = new SqlCommand(
                 $"INSERT INTO {JobsTableSql} (Id, DocumentId, Status, Attempts, MaxChunkCharacters, LogicalPath, Content, SizeBytes, CreatedAtUtc) " +
-                "VALUES (@id, @d, @queued, 0, @m, @p, @c, @s, @now)", connection, tx);
+                "VALUES (@id, @d, @queued, 0, @m, @p, @c, @s, @now)", connection, transaction);
             AddContentParameters(insert, content, logicalPath, maxChunkCharacters);
             insert.Parameters.AddWithValue("@id", jobId);
             insert.Parameters.AddWithValue("@d", documentKey);
@@ -224,7 +227,7 @@ public sealed class SqlIngestQueue : IIngestQueue
         await using (var touch = new SqlCommand(
             // Path, title, modality and the canonical source stay those of the indexed version until the job succeeds.
             $"UPDATE {DocumentsTableSql} SET IndexStatus = @status, UpdatedAtUtc = @now WHERE DocumentId = @d",
-            connection, tx))
+            connection, transaction))
         {
             touch.Parameters.Add(new SqlParameter("@status", SqlDbType.TinyInt) { Value = (byte)IndexStatus.Queued });
             touch.Parameters.AddWithValue("@now", now).SqlDbType = SqlDbType.DateTime2;
@@ -232,6 +235,10 @@ public sealed class SqlIngestQueue : IIngestQueue
             if (await touch.ExecuteNonQueryAsync(ct) == 0)
                 return new ReingestResult(ReingestOutcome.NotFound);
         }
+
+        // A replaced queued job keeps its status (its event is already out), so only a new job announces itself.
+        if (outcome == ReingestOutcome.Created)
+            await tx.PublishAsync(jobId, IngestJobStatus.Queued, ct);
 
         return new ReingestResult(outcome, jobId);
     }
@@ -253,78 +260,62 @@ public sealed class SqlIngestQueue : IIngestQueue
     }
 
     /// <inheritdoc />
-    public Task<IngestJobClaim?> BeginProcessingAsync(Guid jobId, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException("Stream 1");
+    public async Task<IngestJobClaim?> BeginProcessingAsync(Guid jobId, CancellationToken cancellationToken = default)
+    {
+        await using var tx = await JobEventTransaction.BeginAsync(_scopes, cancellationToken);
+        var now = DateTime.UtcNow;
+
+        // Job row first, then its document (lock order). A Processing job is taken again on purpose: that is the
+        // redelivery after a crash, and it counts as another attempt.
+        int documentKey, attempts, maxChunkCharacters;
+        string logicalPath;
+        long sizeBytes;
+        await using (var job = new SqlCommand(
+            $"""
+            UPDATE {JobsTableSql}
+            SET Status = @processing, Attempts = Attempts + 1, StartedAtUtc = COALESCE(StartedAtUtc, @now), Error = NULL
+            OUTPUT inserted.DocumentId, inserted.Attempts, inserted.MaxChunkCharacters, inserted.LogicalPath, inserted.SizeBytes
+            WHERE Id = @id AND Status IN (@queued, @processing)
+            """, tx.Connection, tx.Transaction))
+        {
+            job.Parameters.AddWithValue("@id", jobId);
+            job.Parameters.AddWithValue("@queued", (int)IngestJobStatus.Queued);
+            job.Parameters.AddWithValue("@processing", (int)IngestJobStatus.Processing);
+            job.Parameters.AddWithValue("@now", now).SqlDbType = SqlDbType.DateTime2;
+            await using var reader = await job.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                return null; // missing or terminal: nothing changed, nothing published (disposal rolls back)
+
+            documentKey = reader.GetInt32(0);
+            attempts = reader.GetInt32(1);
+            maxChunkCharacters = reader.GetInt32(2);
+            logicalPath = reader.GetString(3);
+            sizeBytes = reader.GetInt64(4);
+        }
+
+        Guid documentId;
+        await using (var document = new SqlCommand(
+            $"UPDATE {DocumentsTableSql} SET IndexStatus = @status, UpdatedAtUtc = @now OUTPUT inserted.GlobalId WHERE DocumentId = @d",
+            tx.Connection, tx.Transaction))
+        {
+            document.Parameters.Add(new SqlParameter("@status", SqlDbType.TinyInt) { Value = (byte)IndexStatus.Processing });
+            document.Parameters.AddWithValue("@now", now).SqlDbType = SqlDbType.DateTime2;
+            document.Parameters.AddWithValue("@d", documentKey);
+            // The job row we just locked keeps the document from being deleted underneath us (cascade needs it).
+            documentId = (Guid)(await document.ExecuteScalarAsync(cancellationToken))!;
+        }
+
+        await tx.PublishAsync(jobId, IngestJobStatus.Processing, cancellationToken);
+        await tx.CommitAsync();
+        return new IngestJobClaim(jobId, documentId, attempts, maxChunkCharacters, logicalPath, sizeBytes);
+    }
 
     /// <inheritdoc />
-    public Task<bool> HasActiveJobsAsync(CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException("Stream 1");
-
-    public async Task<IngestJobClaim?> TryClaimNextAsync(string owner, TimeSpan lease, CancellationToken cancellationToken = default)
+    public async Task<bool> HasActiveJobsAsync(CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
-
-        // 1. Jobs abandoned with no attempts left become Failed (dropping their stored bytes), and so do their documents.
-        // 2. Claim the oldest claimable job (CTE so ORDER BY applies to the single updated row), then mark its document
-        //    Processing. No transaction around the batch: each statement is atomic, the job row is claimed (and its
-        //    lock released) before the document row is touched, and READPAST keeps claimers from queueing behind each other.
-        const string sql = $"""
-            SET NOCOUNT ON;
-
-            DECLARE @dead TABLE (DocumentId int NOT NULL);
-            DECLARE @claimed TABLE (
-                Id uniqueidentifier NOT NULL, DocumentId int NOT NULL, Attempts int NOT NULL,
-                MaxChunkCharacters int NOT NULL, LogicalPath nvarchar(1024) NOT NULL, SizeBytes bigint NOT NULL);
-
-            UPDATE {JobsTableSql} WITH (READPAST)
-            SET Status = @failed, CompletedAtUtc = @now, LeaseOwner = NULL, LeaseExpiresAtUtc = NULL, Content = NULL,
-                Error = COALESCE(Error, N'The job was abandoned after ' + CAST(Attempts AS nvarchar(11)) + N' attempt(s).')
-            OUTPUT inserted.DocumentId INTO @dead
-            WHERE Status = @processing AND LeaseExpiresAtUtc < @now AND Attempts >= @maxAttempts;
-
-            UPDATE d SET IndexStatus = @docFailed, UpdatedAtUtc = @now
-            FROM {DocumentsTableSql} d WHERE d.DocumentId IN (SELECT DocumentId FROM @dead);
-
-            ;WITH claimable AS (
-                SELECT TOP (1) *
-                FROM {JobsTableSql} WITH (UPDLOCK, READPAST, ROWLOCK)
-                WHERE Status = @queued
-                   OR (Status = @processing AND LeaseExpiresAtUtc < @now AND Attempts < @maxAttempts)
-                ORDER BY CreatedAtUtc, Id
-            )
-            UPDATE claimable
-            SET Status = @processing, Attempts = Attempts + 1, LeaseOwner = @owner, LeaseExpiresAtUtc = @leaseUntil,
-                StartedAtUtc = COALESCE(StartedAtUtc, @now), Error = NULL
-            OUTPUT inserted.Id, inserted.DocumentId, inserted.Attempts, inserted.MaxChunkCharacters, inserted.LogicalPath, inserted.SizeBytes
-            INTO @claimed;
-
-            UPDATE d SET IndexStatus = @docProcessing, UpdatedAtUtc = @now
-            FROM {DocumentsTableSql} d WHERE d.DocumentId IN (SELECT DocumentId FROM @claimed);
-
-            SELECT c.Id, d.GlobalId, c.Attempts, c.MaxChunkCharacters, c.LogicalPath, c.SizeBytes
-            FROM @claimed c JOIN {DocumentsTableSql} d ON d.DocumentId = c.DocumentId;
-            """;
-
-        var now = DateTime.UtcNow;
-        await using var connection = new SqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@now", now).SqlDbType = SqlDbType.DateTime2;
-        command.Parameters.AddWithValue("@leaseUntil", now + lease).SqlDbType = SqlDbType.DateTime2;
-        command.Parameters.AddWithValue("@owner", owner);
-        command.Parameters.AddWithValue("@maxAttempts", _settings.MaxAttempts);
-        command.Parameters.AddWithValue("@queued", (int)IngestJobStatus.Queued);
-        command.Parameters.AddWithValue("@processing", (int)IngestJobStatus.Processing);
-        command.Parameters.AddWithValue("@failed", (int)IngestJobStatus.Failed);
-        command.Parameters.Add(new SqlParameter("@docFailed", SqlDbType.TinyInt) { Value = (byte)IndexStatus.Failed });
-        command.Parameters.Add(new SqlParameter("@docProcessing", SqlDbType.TinyInt) { Value = (byte)IndexStatus.Processing });
-
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-            return null;
-
-        return new IngestJobClaim(
-            reader.GetGuid(0), reader.GetGuid(1), reader.GetInt32(2), reader.GetInt32(3), reader.GetString(4), reader.GetInt64(5));
+        await using var db = CreateContext();
+        return await db.IngestJobs.AsNoTracking()
+            .AnyAsync(j => j.Status == IngestJobStatus.Queued || j.Status == IngestJobStatus.Processing, cancellationToken);
     }
 
     /// <inheritdoc />
@@ -345,16 +336,6 @@ public sealed class SqlIngestQueue : IIngestQueue
         await content.CopyToAsync(destination, cancellationToken);
     }
 
-    public async Task<bool> ExtendLeaseAsync(Guid jobId, string owner, TimeSpan lease, CancellationToken cancellationToken = default)
-    {
-        var until = DateTime.UtcNow + lease;
-        await using var db = CreateContext();
-        var updated = await db.IngestJobs
-            .Where(j => j.Id == jobId && j.LeaseOwner == owner && j.Status == IngestJobStatus.Processing)
-            .ExecuteUpdateAsync(s => s.SetProperty(j => j.LeaseExpiresAtUtc, (DateTime?)until), cancellationToken);
-        return updated > 0;
-    }
-
     /// <inheritdoc />
     public async Task CompleteAsync(Guid jobId, IngestJobOutcome outcome, CancellationToken cancellationToken = default)
     {
@@ -365,8 +346,8 @@ public sealed class SqlIngestQueue : IIngestQueue
         var now = DateTime.UtcNow;
         var documentStatus = outcome.Status == IngestJobStatus.Failed ? IndexStatus.Failed : IndexStatus.Indexed;
 
-        await using var db = CreateContext();
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+        await using var tx = await JobEventTransaction.BeginAsync(_scopes, cancellationToken);
+        await using var db = tx.CreateDbContext();
         // A job deleted with its document (cascade) updates nothing here, which is the intended quiet outcome.
         var updated = await db.IngestJobs.Where(j => j.Id == jobId)
             .ExecuteUpdateAsync(s => s
@@ -374,9 +355,7 @@ public sealed class SqlIngestQueue : IIngestQueue
                 .SetProperty(j => j.ChunkCount, outcome.ChunkCount)
                 .SetProperty(j => j.Error, outcome.Error)
                 .SetProperty(j => j.Content, (byte[]?)null)
-                .SetProperty(j => j.CompletedAtUtc, (DateTime?)now)
-                .SetProperty(j => j.LeaseOwner, (string?)null)
-                .SetProperty(j => j.LeaseExpiresAtUtc, (DateTime?)null),
+                .SetProperty(j => j.CompletedAtUtc, (DateTime?)now),
                 cancellationToken);
         if (updated > 0)
         {
@@ -385,97 +364,10 @@ public sealed class SqlIngestQueue : IIngestQueue
                     .SetProperty(d => d.IndexStatus, documentStatus)
                     .SetProperty(d => d.UpdatedAtUtc, now),
                     cancellationToken);
+            await tx.PublishAsync(jobId, outcome.Status, cancellationToken);
         }
 
-        await transaction.CommitAsync(cancellationToken);
-    }
-
-    public async Task<IngestJobStatus> FailAsync(Guid jobId, string error, CancellationToken cancellationToken = default)
-    {
-        await using var db = CreateContext();
-
-        var attempts = await db.IngestJobs.AsNoTracking()
-            .Where(j => j.Id == jobId)
-            .Select(j => (int?)j.Attempts)
-            .SingleOrDefaultAsync(cancellationToken);
-        if (attempts is null)
-            return IngestJobStatus.Failed; // deleted together with its document: nothing to record
-
-        // Only the worker holding the claim calls this, so reading then writing is not racy.
-        var exhausted = attempts >= _settings.MaxAttempts;
-        var status = exhausted ? IngestJobStatus.Failed : IngestJobStatus.Queued;
-        var documentStatus = exhausted ? IndexStatus.Failed : IndexStatus.Queued;
-        var now = DateTime.UtcNow;
-        DateTime? completedAt = exhausted ? now : null;
-
-        await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
-        var job = db.IngestJobs.Where(j => j.Id == jobId);
-        if (exhausted)
-        {
-            // Terminal: drop the bytes too.
-            await job.ExecuteUpdateAsync(s => s
-                .SetProperty(j => j.Status, status)
-                .SetProperty(j => j.CompletedAtUtc, completedAt)
-                .SetProperty(j => j.Error, error)
-                .SetProperty(j => j.Content, (byte[]?)null)
-                .SetProperty(j => j.LeaseOwner, (string?)null)
-                .SetProperty(j => j.LeaseExpiresAtUtc, (DateTime?)null),
-                cancellationToken);
-        }
-        else
-        {
-            await job.ExecuteUpdateAsync(s => s
-                .SetProperty(j => j.Status, status)
-                .SetProperty(j => j.CompletedAtUtc, completedAt)
-                .SetProperty(j => j.Error, error)
-                .SetProperty(j => j.LeaseOwner, (string?)null)
-                .SetProperty(j => j.LeaseExpiresAtUtc, (DateTime?)null),
-                cancellationToken);
-        }
-
-        await db.Documents.Where(d => d.Jobs.Any(j => j.Id == jobId))
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(d => d.IndexStatus, documentStatus)
-                .SetProperty(d => d.UpdatedAtUtc, now),
-                cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-
-        return status;
-    }
-
-    public async Task<int> ResetInFlightJobsAsync(CancellationToken cancellationToken = default)
-    {
-        // Single-process assumption: this instance is the only worker, so anything still Processing belonged to a
-        // previous process that died. If the app is ever scaled out (multiple workers, so the in-process job registry
-        // no longer sees every job), remove this and rely on lease expiry in TryClaimNextAsync instead.
-        const string sql = $"""
-            SET NOCOUNT ON;
-            SET XACT_ABORT ON;
-            BEGIN TRANSACTION;
-
-            DECLARE @reset TABLE (DocumentId int NOT NULL);
-
-            UPDATE {JobsTableSql}
-            SET Status = @queued, LeaseOwner = NULL, LeaseExpiresAtUtc = NULL
-            OUTPUT inserted.DocumentId INTO @reset
-            WHERE Status = @processing;
-
-            UPDATE d SET IndexStatus = @docQueued, UpdatedAtUtc = @now
-            FROM {DocumentsTableSql} d WHERE d.DocumentId IN (SELECT DocumentId FROM @reset);
-
-            SELECT COUNT(*) FROM @reset;
-
-            COMMIT TRANSACTION;
-            """;
-
-        await using var connection = new SqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@queued", (int)IngestJobStatus.Queued);
-        command.Parameters.AddWithValue("@processing", (int)IngestJobStatus.Processing);
-        command.Parameters.Add(new SqlParameter("@docQueued", SqlDbType.TinyInt) { Value = (byte)IndexStatus.Queued });
-        command.Parameters.AddWithValue("@now", DateTime.UtcNow).SqlDbType = SqlDbType.DateTime2;
-        return Convert.ToInt32(await command.ExecuteScalarAsync(cancellationToken));
+        await tx.CommitAsync();
     }
 
     /// <inheritdoc />
@@ -525,7 +417,7 @@ public sealed class SqlIngestQueue : IIngestQueue
 
         var total = await jobs.CountAsync(cancellationToken);
 
-        // Projection leaves Content, the lease fields and the document's blobs/chunks out of the SELECT.
+        // Projection leaves Content and the document's blobs/chunks out of the SELECT.
         var items = await jobs
             .OrderByDescending(j => j.CreatedAtUtc).ThenByDescending(j => j.Id)
             .Skip((page - 1) * pageSize)

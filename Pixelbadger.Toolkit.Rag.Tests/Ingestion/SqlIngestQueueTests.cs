@@ -3,23 +3,39 @@ using FluentAssertions;
 using Microsoft.Data.SqlClient;
 using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Messaging;
 using Pixelbadger.Toolkit.Rag.Persistence;
 using Pixelbadger.Toolkit.Rag.Tests.Support;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Ingestion;
 
 [Collection("SqlServer")]
-public class SqlIngestQueueTests(SqlServerFixture sql)
+public class SqlIngestQueueTests(SqlServerFixture sql) : IAsyncLifetime
 {
-    private static readonly TimeSpan Lease = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan ExpiredLease = TimeSpan.FromSeconds(-1);
+    private readonly List<BusHarness> _harnesses = [];
 
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public async Task DisposeAsync()
+    {
+        foreach (var harness in _harnesses)
+            await harness.DisposeAsync();
+    }
+
+    // The bus is built but never started: published events stay in the outbox, where the tests read them.
     private async Task<(SqlIngestQueue Queue, string ConnectionString)> CreateAsync(int maxAttempts = 3)
     {
+        var (queue, cs, _) = await CreateWithBusAsync(maxAttempts);
+        return (queue, cs);
+    }
+
+    private async Task<(SqlIngestQueue Queue, string ConnectionString, BusHarness Bus)> CreateWithBusAsync(int maxAttempts = 3)
+    {
         var cs = await sql.CreateDatabaseAsync();
-        var options = new SqlStoreOptions { ConnectionString = cs };
-        await new SqlDocumentStore(options).MigrateAsync();
-        return (new SqlIngestQueue(options, new IngestSettings { MaxAttempts = maxAttempts }), cs);
+        var harness = await BusHarness.CreateAsync(cs);
+        _harnesses.Add(harness);
+        var queue = new SqlIngestQueue(new SqlStoreOptions { ConnectionString = cs }, new IngestSettings { MaxAttempts = maxAttempts }, harness.Scopes);
+        return (queue, cs, harness);
     }
 
     private static IngestUpload Upload(string path, string content) =>
@@ -103,139 +119,14 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         (await queue.GetDocumentAsync(Guid.NewGuid())).Should().BeNull();
     }
 
-    // ---- claim ----
-
-    [SkippableFact]
-    public async Task Claim_ReturnsOldestQueuedJob_SetsLeaseAttemptsAndDocumentStatus_ThenNothing()
-    {
-        var (queue, cs) = await CreateAsync();
-        var first = await EnqueueOneAsync(queue, "a.txt", "a", 777);
-        var second = await EnqueueOneAsync(queue, "b.txt", "b", 888);
-
-        var claim = await queue.TryClaimNextAsync("worker-1", Lease);
-
-        claim.Should().Be(new IngestJobClaim(first.JobId, first.DocumentId, 1, 777, "a.txt", 1));
-        var document = (await queue.GetDocumentAsync(first.DocumentId))!;
-        document.IndexStatus.Should().Be(IndexStatus.Processing);
-        document.LatestJob!.Status.Should().Be(IngestJobStatus.Processing);
-        document.LatestJob.Attempts.Should().Be(1);
-        document.LatestJob.StartedAtUtc.Should().NotBeNull();
-        (await ScalarAsync<string>(cs, $"SELECT LeaseOwner FROM dbo.IngestJobs WHERE Id = '{first.JobId}'")).Should().Be("worker-1");
-
-        (await queue.TryClaimNextAsync("worker-2", Lease))!.JobId.Should().Be(second.JobId);
-        (await queue.TryClaimNextAsync("worker-3", Lease)).Should().BeNull("both jobs are leased");
-    }
-
-    [SkippableFact]
-    public async Task ConcurrentClaimers_NeverGetTheSameJob()
-    {
-        var (queue, _) = await CreateAsync();
-        var jobIds = new List<Guid>();
-        for (var i = 0; i < 6; i++)
-            jobIds.Add((await EnqueueOneAsync(queue, $"f{i}.txt", "x")).JobId);
-
-        var claims = await Task.WhenAll(Enumerable.Range(0, 24)
-            .Select(i => Task.Run(() => queue.TryClaimNextAsync($"worker-{i}", Lease))));
-
-        var claimed = claims.Where(c => c is not null).Select(c => c!.JobId).ToList();
-        claimed.Should().OnlyHaveUniqueItems();
-        claimed.Should().BeEquivalentTo(jobIds, "every job is claimed exactly once");
-    }
-
-    [SkippableFact]
-    public async Task ConcurrentClaimers_ForASingleJob_ExactlyOneWins()
-    {
-        var (queue, _) = await CreateAsync();
-        await EnqueueOneAsync(queue, "only.txt", "x");
-
-        var claims = await Task.WhenAll(Enumerable.Range(0, 12)
-            .Select(i => Task.Run(() => queue.TryClaimNextAsync($"worker-{i}", Lease))));
-
-        claims.Count(c => c is not null).Should().Be(1);
-    }
-
-    [SkippableFact]
-    public async Task Claim_ReclaimsAJobWhoseLeaseExpired_IncrementingAttempts()
-    {
-        var (queue, _) = await CreateAsync();
-        var created = await EnqueueOneAsync(queue, "a.txt", "a");
-        (await queue.TryClaimNextAsync("crashed-worker", ExpiredLease))!.Attempts.Should().Be(1);
-
-        var reclaimed = await queue.TryClaimNextAsync("worker-2", Lease);
-
-        reclaimed.Should().Be(new IngestJobClaim(created.JobId, created.DocumentId, 2, 100, "a.txt", 1));
-    }
-
-    [SkippableFact]
-    public async Task Claim_DoesNotTakeAJobWhileItsLeaseIsActive()
-    {
-        var (queue, _) = await CreateAsync();
-        await EnqueueOneAsync(queue, "a.txt", "a");
-        await queue.TryClaimNextAsync("worker-1", Lease);
-
-        (await queue.TryClaimNextAsync("worker-2", Lease)).Should().BeNull();
-    }
-
-    [SkippableFact]
-    public async Task Claim_MarksExhaustedAbandonedJobsFailed_AndDropsTheirBytes()
-    {
-        var (queue, cs) = await CreateAsync(maxAttempts: 2);
-        var created = await EnqueueOneAsync(queue, "a.txt", "aaa");
-        await queue.TryClaimNextAsync("w", ExpiredLease);
-        await queue.TryClaimNextAsync("w", ExpiredLease);
-        (await queue.GetDocumentAsync(created.DocumentId))!.LatestJob!.Attempts.Should().Be(2);
-
-        var third = await queue.TryClaimNextAsync("w", Lease);
-
-        third.Should().BeNull();
-        var document = (await queue.GetDocumentAsync(created.DocumentId))!;
-        document.IndexStatus.Should().Be(IndexStatus.Failed);
-        document.LatestJob!.Status.Should().Be(IngestJobStatus.Failed);
-        document.LatestJob.CompletedAtUtc.Should().NotBeNull();
-        document.LatestJob.Error.Should().Contain("abandoned after 2 attempt");
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs WHERE Content IS NOT NULL")).Should().Be(0);
-    }
-
-    // ---- fail / complete / content / lease ----
-
-    [SkippableFact]
-    public async Task Fail_RequeuesWhileAttemptsRemain_ThenFails()
-    {
-        var (queue, cs) = await CreateAsync(maxAttempts: 2);
-        var created = await EnqueueOneAsync(queue, "a.txt", "aaa");
-
-        await queue.TryClaimNextAsync("w", Lease);
-        (await queue.FailAsync(created.JobId, "first error")).Should().Be(IngestJobStatus.Queued);
-        var requeued = (await queue.GetDocumentAsync(created.DocumentId))!;
-        requeued.IndexStatus.Should().Be(IndexStatus.Queued);
-        requeued.LatestJob!.Status.Should().Be(IngestJobStatus.Queued);
-        requeued.LatestJob.Error.Should().Be("first error");
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs WHERE Content IS NOT NULL")).Should().Be(1, "a retry still needs the bytes");
-
-        await queue.TryClaimNextAsync("w", Lease);
-        (await queue.FailAsync(created.JobId, "second error")).Should().Be(IngestJobStatus.Failed);
-        var failed = (await queue.GetDocumentAsync(created.DocumentId))!;
-        failed.IndexStatus.Should().Be(IndexStatus.Failed);
-        failed.LatestJob!.Status.Should().Be(IngestJobStatus.Failed);
-        failed.LatestJob.Error.Should().Be("second error");
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs WHERE Content IS NOT NULL")).Should().Be(0);
-        (await queue.TryClaimNextAsync("w", Lease)).Should().BeNull();
-    }
-
-    [SkippableFact]
-    public async Task Fail_ForADeletedJob_IsANoOp()
-    {
-        var (queue, _) = await CreateAsync();
-
-        (await queue.FailAsync(Guid.NewGuid(), "whatever")).Should().Be(IngestJobStatus.Failed);
-    }
+    // ---- complete / content ----
 
     [SkippableFact]
     public async Task Complete_RecordsOutcome_NullsContent_AndMarksTheDocumentIndexed()
     {
         var (queue, cs) = await CreateAsync();
         var created = await EnqueueOneAsync(queue, "a.md", "# a");
-        await queue.TryClaimNextAsync("w", Lease);
+        await queue.BeginProcessingAsync(created.JobId);
 
         await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, ChunkCount: 4));
 
@@ -245,7 +136,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         document.LatestJob.CompletedAtUtc.Should().NotBeNull();
         (await ScalarAsync<int>(cs, $"SELECT ChunkCount FROM dbo.IngestJobs WHERE Id = '{created.JobId}'")).Should().Be(4);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs WHERE Content IS NOT NULL")).Should().Be(0);
-        (await queue.TryClaimNextAsync("w", Lease)).Should().BeNull();
+        (await queue.HasActiveJobsAsync()).Should().BeFalse();
     }
 
     [SkippableFact]
@@ -254,8 +145,8 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         var (queue, _) = await CreateAsync();
         var skipped = await EnqueueOneAsync(queue, "empty.txt", " ");
         var failed = await EnqueueOneAsync(queue, "bad.txt", "b");
-        await queue.TryClaimNextAsync("w", Lease);
-        await queue.TryClaimNextAsync("w", Lease);
+        await queue.BeginProcessingAsync(skipped.JobId);
+        await queue.BeginProcessingAsync(failed.JobId);
 
         await queue.CompleteAsync(skipped.JobId, new IngestJobOutcome(IngestJobStatus.Skipped, ChunkCount: 0));
         await queue.CompleteAsync(failed.JobId, new IngestJobOutcome(IngestJobStatus.Failed, Error: "chunk too large"));
@@ -278,24 +169,10 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
 
         (await ReadContentAsync(queue, created.JobId)).Should().Be(big);
 
-        await queue.TryClaimNextAsync("w", Lease);
+        await queue.BeginProcessingAsync(created.JobId);
         await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, 1));
         var act = async () => await queue.ReadContentAsync(created.JobId, new MemoryStream());
         await act.Should().ThrowAsync<InvalidOperationException>();
-    }
-
-    [SkippableFact]
-    public async Task ExtendLease_OnlyForTheOwnerOfAProcessingJob()
-    {
-        var (queue, _) = await CreateAsync();
-        var created = await EnqueueOneAsync(queue, "a.txt", "a");
-
-        (await queue.ExtendLeaseAsync(created.JobId, "w", Lease)).Should().BeFalse("not claimed yet");
-        await queue.TryClaimNextAsync("w", ExpiredLease);
-
-        (await queue.ExtendLeaseAsync(created.JobId, "someone-else", Lease)).Should().BeFalse();
-        (await queue.ExtendLeaseAsync(created.JobId, "w", Lease)).Should().BeTrue();
-        (await queue.TryClaimNextAsync("other", Lease)).Should().BeNull("the extended lease protects the job");
     }
 
     // ---- re-ingest ----
@@ -315,7 +192,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
     {
         var (queue, cs) = await CreateAsync();
         var created = await EnqueueOneAsync(queue, "docs/v1.md", "first");
-        await queue.TryClaimNextAsync("w", Lease);
+        await queue.BeginProcessingAsync(created.JobId);
         await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, 1));
 
         var result = await queue.EnqueueReingestAsync(created.DocumentId, Upload("docs/v2.txt", "second"), 555);
@@ -329,7 +206,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         document.LatestJob!.JobId.Should().Be(result.JobId!.Value);
         document.LatestJob.Status.Should().Be(IngestJobStatus.Queued);
         (await ScalarAsync<int>(cs, $"SELECT COUNT(*) FROM dbo.IngestJobs WHERE DocumentId = (SELECT DocumentId FROM dbo.Documents WHERE GlobalId = '{created.DocumentId}')")).Should().Be(2);
-        var claim = (await queue.TryClaimNextAsync("w", Lease))!;
+        var claim = (await queue.BeginProcessingAsync(result.JobId.Value))!;
         claim.Should().Be(new IngestJobClaim(result.JobId.Value, created.DocumentId, 1, 555, "docs/v2.txt", 6));
         (await ReadContentAsync(queue, claim.JobId)).Should().Be("second");
     }
@@ -349,7 +226,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         document.Path.Should().Be("a.md");
         document.Modality.Should().Be(Modality.Text);
         document.IndexStatus.Should().Be(IndexStatus.Queued);
-        (await queue.TryClaimNextAsync("w", Lease)).Should().Be(new IngestJobClaim(created.JobId, created.DocumentId, 1, 200, "b.txt", 10));
+        (await queue.BeginProcessingAsync(created.JobId)).Should().Be(new IngestJobClaim(created.JobId, created.DocumentId, 1, 200, "b.txt", 10));
     }
 
     [SkippableFact]
@@ -357,7 +234,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
     {
         var (queue, _) = await CreateAsync();
         var created = await EnqueueOneAsync(queue, "a.md", "running bytes");
-        await queue.TryClaimNextAsync("w", Lease);
+        await queue.BeginProcessingAsync(created.JobId);
 
         var result = await queue.EnqueueReingestAsync(created.DocumentId, Upload("b.txt", "rejected"), 100);
 
@@ -369,28 +246,25 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
     }
 
     [SkippableFact]
-    public async Task Reingest_RacingAClaim_NeverLosesTheUploadSilently()
+    public async Task Reingest_RacingBeginProcessing_NeverLosesTheUploadSilently()
     {
         var (queue, _) = await CreateAsync();
 
         for (var i = 0; i < 50; i++)
         {
             var created = await EnqueueOneAsync(queue, $"race{i}.txt", "old");
-            var claimTask = Task.Run(() => queue.TryClaimNextAsync($"w{i}", Lease));
+            var beginTask = Task.Run(() => queue.BeginProcessingAsync(created.JobId));
             var reingestTask = Task.Run(() => queue.EnqueueReingestAsync(created.DocumentId, Upload($"race{i}.txt", "new"), 100));
-            var claim = await claimTask;
+            var claim = await beginTask;
             var reingest = await reingestTask;
 
-            // A claim that lost the race (the row was locked) simply tries again.
-            claim ??= await queue.TryClaimNextAsync($"w{i}", Lease);
-            claim.Should().NotBeNull();
-            claim!.JobId.Should().Be(created.JobId);
-            var content = await ReadContentAsync(queue, claim.JobId);
+            claim.Should().NotBeNull("the job was queued and nothing else touches it");
+            var content = await ReadContentAsync(queue, claim!.JobId);
             if (reingest.Outcome == ReingestOutcome.ReplacedQueued)
                 content.Should().Be("new", "an accepted replacement is what gets processed");
             else
             {
-                reingest.Outcome.Should().Be(ReingestOutcome.Conflict, "the only other answer: the worker got there first");
+                reingest.Outcome.Should().Be(ReingestOutcome.Conflict, "the only other answer: processing got there first");
                 content.Should().Be("old");
             }
 
@@ -398,30 +272,190 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         }
     }
 
-    // ---- startup reset / cascade ----
+    // ---- events ----
 
     [SkippableFact]
-    public async Task ResetInFlightJobs_RequeuesProcessingJobsAndTheirDocuments_AndNothingElse()
+    public async Task EnqueueNewDocuments_PublishesQueuedPerJob_InUploadOrder()
+    {
+        var (queue, _, bus) = await CreateWithBusAsync();
+
+        var created = await queue.EnqueueNewDocumentsAsync([Upload("a.txt", "a"), Upload("b.txt", "b"), Upload("c.txt", "c")], 100);
+
+        (await bus.PublishedEventsAsync()).Should().Equal(created.Select(c => new JobStatusChanged(c.JobId, IngestJobStatus.Queued)));
+    }
+
+    [SkippableFact]
+    public async Task EnqueueNewDocuments_WhenRolledBack_PublishesNothing()
+    {
+        var (queue, _, bus) = await CreateWithBusAsync();
+        var broken = new IngestUpload("broken.txt", 1, () => throw new IOException("upload stream failed"));
+
+        var act = async () => await queue.EnqueueNewDocumentsAsync([Upload("fine.txt", "ok"), broken], 100);
+
+        await act.Should().ThrowAsync<IOException>();
+        (await bus.PublishedEventsAsync()).Should().BeEmpty("the first upload's event was written in the rolled-back transaction");
+    }
+
+    [SkippableFact]
+    public async Task Reingest_PublishesQueuedOnlyForANewJob()
+    {
+        var (queue, _, bus) = await CreateWithBusAsync();
+        var created = await EnqueueOneAsync(queue, "a.txt", "one");
+
+        var replaced = await queue.EnqueueReingestAsync(created.DocumentId, Upload("a.txt", "two"), 100);
+        replaced.Outcome.Should().Be(ReingestOutcome.ReplacedQueued);
+        (await bus.PublishedEventsAsync()).Should().Equal(new JobStatusChanged(created.JobId, IngestJobStatus.Queued));
+
+        await queue.BeginProcessingAsync(created.JobId);
+        (await queue.EnqueueReingestAsync(created.DocumentId, Upload("a.txt", "three"), 100)).Outcome.Should().Be(ReingestOutcome.Conflict);
+        await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, 1));
+        var fresh = await queue.EnqueueReingestAsync(created.DocumentId, Upload("a.txt", "four"), 100);
+
+        fresh.Outcome.Should().Be(ReingestOutcome.Created);
+        (await bus.PublishedEventsAsync()).Should().Equal(
+            new JobStatusChanged(created.JobId, IngestJobStatus.Queued),
+            new JobStatusChanged(created.JobId, IngestJobStatus.Processing),
+            new JobStatusChanged(created.JobId, IngestJobStatus.Succeeded),
+            new JobStatusChanged(fresh.JobId!.Value, IngestJobStatus.Queued));
+    }
+
+    [SkippableFact]
+    public async Task Reingest_ThatChangesNothing_PublishesNothing()
+    {
+        var (queue, _, bus) = await CreateWithBusAsync();
+        var created = await EnqueueOneAsync(queue, "a.txt", "one");
+        await queue.BeginProcessingAsync(created.JobId);
+        var before = (await bus.PublishedEventsAsync()).Count;
+
+        (await queue.EnqueueReingestAsync(created.DocumentId, Upload("a.txt", "two"), 100)).Outcome.Should().Be(ReingestOutcome.Conflict);
+        (await queue.EnqueueReingestAsync(Guid.NewGuid(), Upload("a.txt", "two"), 100)).Outcome.Should().Be(ReingestOutcome.NotFound);
+
+        (await bus.PublishedEventsAsync()).Should().HaveCount(before);
+    }
+
+    // ---- begin processing ----
+
+    [SkippableFact]
+    public async Task BeginProcessing_MovesAQueuedJobAndItsDocumentToProcessing_AndPublishes()
+    {
+        var (queue, _, bus) = await CreateWithBusAsync();
+        var first = await EnqueueOneAsync(queue, "a.txt", "a", 777);
+        var second = await EnqueueOneAsync(queue, "b.txt", "b", 888);
+
+        var claim = await queue.BeginProcessingAsync(first.JobId);
+
+        claim.Should().Be(new IngestJobClaim(first.JobId, first.DocumentId, 1, 777, "a.txt", 1));
+        var document = (await queue.GetDocumentAsync(first.DocumentId))!;
+        document.IndexStatus.Should().Be(IndexStatus.Processing);
+        document.LatestJob!.Status.Should().Be(IngestJobStatus.Processing);
+        document.LatestJob.Attempts.Should().Be(1);
+        document.LatestJob.StartedAtUtc.Should().NotBeNull();
+        (await queue.GetDocumentAsync(second.DocumentId))!.LatestJob!.Status.Should().Be(IngestJobStatus.Queued, "only the named job moves");
+        var events = await bus.PublishedEventsAsync();
+        events.Should().HaveCount(3);
+        events[^1].Should().Be(new JobStatusChanged(first.JobId, IngestJobStatus.Processing));
+    }
+
+    [SkippableFact]
+    public async Task BeginProcessing_AgainAfterACrash_IncrementsAttempts_KeepsStartedAt_AndClearsTheError()
+    {
+        var (queue, cs, bus) = await CreateWithBusAsync();
+        var created = await EnqueueOneAsync(queue, "a.txt", "a");
+        (await queue.BeginProcessingAsync(created.JobId))!.Attempts.Should().Be(1);
+        var startedAt = (await queue.GetDocumentAsync(created.DocumentId))!.LatestJob!.StartedAtUtc;
+        await ExecAsync(cs, $"UPDATE dbo.IngestJobs SET Error = N'boom' WHERE Id = '{created.JobId}'");
+
+        var again = await queue.BeginProcessingAsync(created.JobId);
+
+        again.Should().Be(new IngestJobClaim(created.JobId, created.DocumentId, 2, 100, "a.txt", 1));
+        var job = (await queue.GetDocumentAsync(created.DocumentId))!.LatestJob!;
+        job.Status.Should().Be(IngestJobStatus.Processing);
+        job.StartedAtUtc.Should().Be(startedAt);
+        job.Error.Should().BeNull();
+        (await bus.PublishedEventsAsync()).Count(e => e.Status == IngestJobStatus.Processing).Should().Be(2);
+    }
+
+    [SkippableFact]
+    public async Task BeginProcessing_ForATerminalOrMissingJob_ReturnsNull_ChangesNothing_AndPublishesNothing()
+    {
+        var (queue, _, bus) = await CreateWithBusAsync();
+        var created = await EnqueueOneAsync(queue, "a.txt", "a");
+        await queue.BeginProcessingAsync(created.JobId);
+        await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, 1));
+        var before = (await bus.PublishedEventsAsync()).Count;
+
+        (await queue.BeginProcessingAsync(created.JobId)).Should().BeNull();
+        (await queue.BeginProcessingAsync(Guid.NewGuid())).Should().BeNull();
+
+        var document = (await queue.GetDocumentAsync(created.DocumentId))!;
+        document.IndexStatus.Should().Be(IndexStatus.Indexed);
+        document.LatestJob!.Status.Should().Be(IngestJobStatus.Succeeded);
+        document.LatestJob.Attempts.Should().Be(1);
+        (await bus.PublishedEventsAsync()).Should().HaveCount(before);
+    }
+
+    // ---- complete events / active jobs ----
+
+    [SkippableFact]
+    public async Task Complete_PublishesTheTerminalStatus()
+    {
+        var (queue, _, bus) = await CreateWithBusAsync();
+        var ok = await EnqueueOneAsync(queue, "ok.txt", "o");
+        var empty = await EnqueueOneAsync(queue, "empty.txt", " ");
+        var bad = await EnqueueOneAsync(queue, "bad.txt", "b");
+
+        await queue.CompleteAsync(ok.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, 1));
+        await queue.CompleteAsync(empty.JobId, new IngestJobOutcome(IngestJobStatus.Skipped, 0));
+        await queue.CompleteAsync(bad.JobId, new IngestJobOutcome(IngestJobStatus.Failed, Error: "nope"));
+
+        (await bus.PublishedEventsAsync()).Skip(3).Should().Equal(
+            new JobStatusChanged(ok.JobId, IngestJobStatus.Succeeded),
+            new JobStatusChanged(empty.JobId, IngestJobStatus.Skipped),
+            new JobStatusChanged(bad.JobId, IngestJobStatus.Failed));
+    }
+
+    [SkippableFact]
+    public async Task Complete_ForADeletedJob_IsQuiet_AndPublishesNothing()
+    {
+        var (queue, cs, bus) = await CreateWithBusAsync();
+        var created = await EnqueueOneAsync(queue, "a.txt", "a");
+        await queue.BeginProcessingAsync(created.JobId);
+        await new SqlDocumentStore(new SqlStoreOptions { ConnectionString = cs }).DeleteDocumentAsync(created.DocumentId);
+        var before = (await bus.PublishedEventsAsync()).Count;
+
+        await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, 1));
+
+        (await bus.PublishedEventsAsync()).Should().HaveCount(before);
+    }
+
+    [SkippableFact]
+    public async Task Complete_RejectsANonTerminalStatus()
     {
         var (queue, _) = await CreateAsync();
-        var processing = await EnqueueOneAsync(queue, "p.txt", "p");
-        var done = await EnqueueOneAsync(queue, "d.txt", "d");
-        var waiting = await EnqueueOneAsync(queue, "w.txt", "w");
-        await queue.TryClaimNextAsync("w", Lease); // p
-        await queue.TryClaimNextAsync("w", Lease); // d
-        await queue.CompleteAsync(done.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, 1));
+        var created = await EnqueueOneAsync(queue, "a.txt", "a");
 
-        (await queue.ResetInFlightJobsAsync()).Should().Be(1);
+        var act = async () => await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Processing));
 
-        var p = (await queue.GetDocumentAsync(processing.DocumentId))!;
-        p.IndexStatus.Should().Be(IndexStatus.Queued);
-        p.LatestJob!.Status.Should().Be(IngestJobStatus.Queued);
-        (await queue.GetDocumentAsync(done.DocumentId))!.LatestJob!.Status.Should().Be(IngestJobStatus.Succeeded);
-        (await queue.GetDocumentAsync(waiting.DocumentId))!.LatestJob!.Status.Should().Be(IngestJobStatus.Queued);
-        (await queue.ResetInFlightJobsAsync()).Should().Be(0);
-        // Claimable again right away, although its lease had not expired.
-        (await queue.TryClaimNextAsync("new-process", Lease))!.JobId.Should().Be(processing.JobId);
+        await act.Should().ThrowAsync<ArgumentException>();
     }
+
+    [SkippableFact]
+    public async Task HasActiveJobs_IsTrueWhileAJobIsQueuedOrProcessing()
+    {
+        var (queue, _) = await CreateAsync();
+        (await queue.HasActiveJobsAsync()).Should().BeFalse("empty");
+
+        var created = await EnqueueOneAsync(queue, "a.txt", "a");
+        (await queue.HasActiveJobsAsync()).Should().BeTrue("queued");
+
+        await queue.BeginProcessingAsync(created.JobId);
+        (await queue.HasActiveJobsAsync()).Should().BeTrue("processing");
+
+        await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Failed, Error: "x"));
+        (await queue.HasActiveJobsAsync()).Should().BeFalse("terminal");
+    }
+
+    // ---- cascade ----
 
     [SkippableFact]
     public async Task DeletingTheDocument_CascadesToItsJobs()
@@ -438,7 +472,8 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         (await ScalarAsync<int>(cs, $"SELECT COUNT(*) FROM dbo.IngestJobs WHERE Id = '{created.JobId}'")).Should().Be(0);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs")).Should().Be(1);
         (await queue.GetDocumentAsync(other.DocumentId)).Should().NotBeNull();
-        (await queue.TryClaimNextAsync("w", Lease))!.JobId.Should().Be(other.JobId);
+        (await queue.BeginProcessingAsync(created.JobId)).Should().BeNull("the job went with its document");
+        (await queue.BeginProcessingAsync(other.JobId)).Should().NotBeNull();
         (await store.DeleteDocumentAsync(created.DocumentId)).Should().BeFalse();
     }
 
@@ -531,9 +566,9 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         var failed = await EnqueueOneAsync(queue, "failed.txt", "f");
         await Task.Delay(20);
         await EnqueueOneAsync(queue, "waiting.txt", "w");
-        (await queue.TryClaimNextAsync("w", Lease))!.JobId.Should().Be(done.JobId);
+        (await queue.BeginProcessingAsync(done.JobId)).Should().NotBeNull();
         await queue.CompleteAsync(done.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, ChunkCount: 4));
-        (await queue.TryClaimNextAsync("w", Lease))!.JobId.Should().Be(failed.JobId);
+        (await queue.BeginProcessingAsync(failed.JobId)).Should().NotBeNull();
         await queue.CompleteAsync(failed.JobId, new IngestJobOutcome(IngestJobStatus.Failed, Error: "bad file"));
 
         var succeeded = await queue.GetJobsAsync(1, 25, IngestJobStatus.Succeeded);
@@ -563,13 +598,21 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         var created = await EnqueueOneAsync(queue, "big.txt", new string('x', 5000));
         (await queue.GetJobsAsync(1, 25)).Jobs.Single().SizeBytes.Should().Be(5000);
 
-        await queue.TryClaimNextAsync("w", Lease);
+        await queue.BeginProcessingAsync(created.JobId);
         await queue.CompleteAsync(created.JobId, new IngestJobOutcome(IngestJobStatus.Succeeded, ChunkCount: 1));
 
         (await ScalarAsync<int>(cs, $"SELECT CASE WHEN Content IS NULL THEN 1 ELSE 0 END FROM dbo.IngestJobs WHERE Id = '{created.JobId}'")).Should().Be(1);
         (await queue.GetJobsAsync(1, 25)).Jobs.Single().SizeBytes.Should().Be(5000);
         // The listing DTO has no byte[] member, and the SQL projection selects only its fields.
         typeof(IngestJobListItemDto).GetProperties().Select(p => p.PropertyType).Should().NotContain(typeof(byte[]));
+    }
+
+    private static async Task ExecAsync(string cs, string query)
+    {
+        await using var conn = new SqlConnection(cs);
+        await conn.OpenAsync();
+        await using var cmd = new SqlCommand(query, conn);
+        await cmd.ExecuteNonQueryAsync();
     }
 
     private static async Task<List<Guid>> GuidsAsync(string cs, string query)

@@ -28,7 +28,7 @@ public sealed class IngestJob
 
     public IngestJobStatus Status { get; set; }
 
-    /// <summary>Incremented each time a worker claims the job.</summary>
+    /// <summary>Incremented each time processing of the job begins (again after a crash).</summary>
     public int Attempts { get; set; }
 
     public int MaxChunkCharacters { get; set; }
@@ -50,12 +50,6 @@ public sealed class IngestJob
     public DateTime? StartedAtUtc { get; set; }
 
     public DateTime? CompletedAtUtc { get; set; }
-
-    /// <summary>Instance id of the worker holding the lease.</summary>
-    public string? LeaseOwner { get; set; }
-
-    /// <summary>While Processing: when the claim lapses and another worker may take the job over.</summary>
-    public DateTime? LeaseExpiresAtUtc { get; set; }
 
     public static bool IsTerminal(IngestJobStatus status) => status >= IngestJobStatus.Succeeded;
 }
