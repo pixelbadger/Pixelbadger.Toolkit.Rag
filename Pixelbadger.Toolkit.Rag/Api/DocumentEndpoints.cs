@@ -60,7 +60,6 @@ public static class DocumentEndpoints
         IngestSettings settings,
         IngestRequestValidator validator,
         IIngestQueue queue,
-        IngestWorkerSignal signal,
         CancellationToken cancellationToken)
     {
         var form = await ReadFormAsync(request, settings, cancellationToken);
@@ -72,7 +71,6 @@ public static class DocumentEndpoints
             return upload.Failure;
 
         var created = await queue.EnqueueNewDocumentsAsync(upload.Uploads, upload.MaxChunkCharacters, cancellationToken);
-        signal.Notify();
 
         var documents = new List<DocumentDto>(created.Count);
         foreach (var item in created)
@@ -130,7 +128,6 @@ public static class DocumentEndpoints
         IngestSettings settings,
         IngestRequestValidator validator,
         IIngestQueue queue,
-        IngestWorkerSignal signal,
         CancellationToken cancellationToken)
     {
         var form = await ReadFormAsync(request, settings, cancellationToken);
@@ -153,7 +150,6 @@ public static class DocumentEndpoints
                     statusCode: StatusCodes.Status409Conflict);
         }
 
-        signal.Notify();
         var document = await queue.GetDocumentAsync(documentId, cancellationToken);
         return document is null
             ? NotFound(documentId) // deleted right after it was queued

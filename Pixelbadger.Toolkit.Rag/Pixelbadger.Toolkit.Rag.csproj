@@ -29,6 +29,9 @@
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
     <PackageReference Include="SkiaSharp" Version="4.153.1" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.153.1" />
+    <PackageReference Include="SlimMessageBus.Host.Outbox.Sql" Version="3.5.0" />
+    <PackageReference Include="SlimMessageBus.Host.Serialization.SystemTextJson" Version="3.5.0" />
+    <PackageReference Include="SlimMessageBus.Host.Sql" Version="3.5.0" />
   </ItemGroup>
 
   <ItemGroup>

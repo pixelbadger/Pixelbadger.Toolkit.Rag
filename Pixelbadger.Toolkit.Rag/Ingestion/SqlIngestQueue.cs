@@ -253,6 +253,13 @@ public sealed class SqlIngestQueue : IIngestQueue
     }
 
     /// <inheritdoc />
+    public Task<IngestJobClaim?> BeginProcessingAsync(Guid jobId, CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException("Stream 1");
+
+    /// <inheritdoc />
+    public Task<bool> HasActiveJobsAsync(CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException("Stream 1");
+
     public async Task<IngestJobClaim?> TryClaimNextAsync(string owner, TimeSpan lease, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(owner);
@@ -338,7 +345,6 @@ public sealed class SqlIngestQueue : IIngestQueue
         await content.CopyToAsync(destination, cancellationToken);
     }
 
-    /// <inheritdoc />
     public async Task<bool> ExtendLeaseAsync(Guid jobId, string owner, TimeSpan lease, CancellationToken cancellationToken = default)
     {
         var until = DateTime.UtcNow + lease;
@@ -384,7 +390,6 @@ public sealed class SqlIngestQueue : IIngestQueue
         await transaction.CommitAsync(cancellationToken);
     }
 
-    /// <inheritdoc />
     public async Task<IngestJobStatus> FailAsync(Guid jobId, string error, CancellationToken cancellationToken = default)
     {
         await using var db = CreateContext();
@@ -438,7 +443,6 @@ public sealed class SqlIngestQueue : IIngestQueue
         return status;
     }
 
-    /// <inheritdoc />
     public async Task<int> ResetInFlightJobsAsync(CancellationToken cancellationToken = default)
     {
         // Single-process assumption: this instance is the only worker, so anything still Processing belonged to a

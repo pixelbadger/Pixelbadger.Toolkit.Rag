@@ -277,4 +277,11 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         job.LeaseExpires = null;
         job.Doc.Status = IndexStatus.Failed;
     }
+
+    // Stream 4 implements these against the new contract.
+    public Task<IngestJobClaim?> BeginProcessingAsync(Guid jobId, CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException();
+
+    public Task<bool> HasActiveJobsAsync(CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException();
 }
