@@ -56,6 +56,7 @@ app.UseStatusCodePages();
 
 app.MapHealthChecks("/health");
 app.MapDocumentEndpoints();
+app.MapJobEndpoints();
 app.MapQueryEndpoints();
 app.MapMcp("/mcp");
 
