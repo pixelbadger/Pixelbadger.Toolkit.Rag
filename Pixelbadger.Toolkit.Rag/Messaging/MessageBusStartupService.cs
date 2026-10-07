@@ -40,8 +40,18 @@ public sealed class MessageBusStartupService(
         await _stopping.CancelAsync();
         if (_run is not null)
             await _run;
-        if (_bus is not null)
+        if (_bus is null)
+            return;
+        try
+        {
             await _bus.Stop();
+        }
+        catch (SqlException ex)
+        {
+            // Stopping cancels a consumer's in-flight poll, which SqlClient reports as a SqlException ("Operation
+            // cancelled by user") that SlimMessageBus rethrows. Nothing was being processed by that poll.
+            logger.LogDebug(ex, "A message bus poll was cancelled while stopping");
+        }
     }
 
     private async Task RunAsync(CancellationToken stoppingToken)
