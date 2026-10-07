@@ -373,7 +373,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
     {
         var (queue, _) = await CreateAsync();
 
-        for (var i = 0; i < 15; i++)
+        for (var i = 0; i < 50; i++)
         {
             var created = await EnqueueOneAsync(queue, $"race{i}.txt", "old");
             var claimTask = Task.Run(() => queue.TryClaimNextAsync($"w{i}", Lease));

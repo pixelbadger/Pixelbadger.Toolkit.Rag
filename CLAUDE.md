@@ -174,7 +174,7 @@ Query -> SearchService -> [Lucene BM25 || SQL vector] (max(2n, 20) each) -> RRF 
 ### Ingest queue / worker
 
 - `IngestWorker` handles one job (one file) at a time. A problem with the file (ingester exception) completes the job `Failed` without retry; an infrastructure exception (queue read/complete) goes through `FailAsync` (requeue until `MaxAttempts`, then `Failed`). An `OperationCanceledException` on shutdown leaves the job `Processing` (lease expiry or the startup reset recovers it). A registry cancellation (document delete) or `DocumentNotFoundException` ends the job quietly. The worker must never throw out of `ExecuteAsync` (SQL errors are logged and backed off).
-- Lock order is job row, then document row, everywhere (claim, complete, fail, reset, re-ingest, delete): keep it that way to avoid deadlocks. Re-ingest additionally takes a per-document `sp_getapplock`.
+- Lock order is job row, then document row, everywhere (claim, complete, fail, reset, re-ingest, delete): keep it that way to avoid deadlocks. Re-ingest additionally takes a per-document `sp_getapplock`. Its job lookup and the claim can still deadlock on the jobs table's indexes, so `EnqueueReingestAsync` retries the whole transaction when it is the deadlock victim (SQL error 1205).
 - Stored file bytes are NULLed as soon as a job is terminal (including `Failed`).
 - Changing the claim SQL: it is raw T-SQL in `SqlIngestQueue`; the `SqlIngestQueueTests` / `SqlIngestWorkerTests` cover it and need Docker.
 
