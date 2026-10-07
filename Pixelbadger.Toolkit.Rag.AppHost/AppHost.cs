@@ -10,8 +10,9 @@ using Azure.Provisioning.Storage;
 // Publish (`azd up` / `aspire deploy`):
 //   Azure SQL Database (Entra ID auth through the app's managed identity) and the Dockerfile image on Azure Container
 //   Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, at most one replica), with one Azure Files share at
-//   /data holding the model (/data/models/embeddinggemma-2-onnx, uploaded once with scripts/upload-model.sh). A request wakes the app; a storage-queue scale rule keeps it running while the ingest
-//   worker has work (the worker keeps a marker message in the "ingest-active" queue until the job queue is empty).
+//   /data holding the model (/data/models/embeddinggemma-2-onnx, uploaded once with scripts/upload-model.sh). A request
+//   wakes the app; a storage-queue scale rule keeps it running while ingest has work (the app keeps a marker message in
+//   the "ingest-active" queue until no ingest job is active).
 // Must match QueueIngestKeepAlive.ConnectionName in the app (the connection name and the queue name).
 const string IngestActiveQueue = "ingest-active";
 
@@ -26,7 +27,7 @@ var sql = builder.AddAzureSqlServer("sql")
         .WithLifetime(ContainerLifetime.Persistent));
 
 // The Azure SQL free offer (Aspire's default: General Purpose serverless, auto-pause). The app scales to zero, so the
-// worker only polls while it is awake and the database pauses in between. Past the monthly free allowance the
+// message bus only polls while the app is awake and the database pauses in between. Past the monthly free allowance the
 // database keeps running and bills the overage instead of pausing until the next month.
 var db = sql.AddDatabase("ragdb");
 sql.ConfigureInfrastructure(infra =>
@@ -59,8 +60,8 @@ if (builder.ExecutionContext.IsPublishMode)
         .WithRagDefaults(db, storage, ingestActive)
         .PublishAsAzureContainerApp((infra, app) =>
         {
-            // One instance owns the ingest queue (startup reset, in-process job registry): never scale out. Scale to zero when idle:
-            // an HTTP request wakes the app, and the queue rule keeps it up while the worker's marker is there.
+            // One instance runs the ingest consumers (the in-process job registry cancels deletes): never scale out. Scale
+            // to zero when idle: an HTTP request wakes the app, and the queue rule keeps it up while the keep-alive marker is there.
             app.Template.Scale.MinReplicas = 0;
             app.Template.Scale.MaxReplicas = 1;
             var identityId = infra.GetProvisionableResources().OfType<ProvisioningParameter>()

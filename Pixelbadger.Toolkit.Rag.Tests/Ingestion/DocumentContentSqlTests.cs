@@ -166,7 +166,7 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         await RunWorkerAsync(s);
         var chunksBefore = await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256");
 
-        // Larger than the worker's MaxFileSizeBytes, so the ingester rejects it: a Failed job, no retry.
+        // Larger than the ingest MaxFileSizeBytes, so the ingester rejects it: a Failed job, no retry.
         await s.Queue.EnqueueReingestAsync(created.DocumentId, Upload("b.md", new string('x', MaxFileSize + 1)), 1000);
         await RunWorkerAsync(s);
 

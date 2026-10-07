@@ -13,7 +13,7 @@ using Pixelbadger.Toolkit.Rag.Persistence;
 namespace Pixelbadger.Toolkit.Rag.Tests.Support;
 
 /// <summary>
-/// The real web host with in-memory configuration. By default the hosted services (migrations, recovery, ingest worker)
+/// The real web host with in-memory configuration. By default the hosted services (migrations, message bus startup)
 /// are removed and <see cref="ISearchService"/> / <see cref="IIngestQueue"/> / <see cref="IDocumentStore"/> are mocks, so tests need neither SQL nor a model.
 /// </summary>
 public sealed class RagWebApplicationFactory : WebApplicationFactory<Program>

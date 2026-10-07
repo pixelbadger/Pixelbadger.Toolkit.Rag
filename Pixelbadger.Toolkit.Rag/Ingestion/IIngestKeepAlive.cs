@@ -1,14 +1,14 @@
 namespace Pixelbadger.Toolkit.Rag.Ingestion;
 
 /// <summary>
-/// Tells the hosting platform whether the ingest worker has work, so a host that scales to zero keeps running until
+/// Tells the hosting platform whether ingest has work, so a host that scales to zero keeps running until
 /// the queue is drained. On Azure Container Apps this is a marker message in a storage queue that a queue-length
 /// scale rule watches (<see cref="QueueIngestKeepAlive"/>); elsewhere it does nothing (<see cref="NoIngestKeepAlive"/>).
 /// Implementations log and swallow their own failures: keeping the host alive must never fail a job.
 /// </summary>
 public interface IIngestKeepAlive
 {
-    /// <summary>The worker claimed a job (or is still running one): keep the host running.</summary>
+    /// <summary>A job is starting or still running: keep the host running.</summary>
     Task MarkBusyAsync(CancellationToken cancellationToken);
 
     /// <summary>The queue is empty: the host may scale down.</summary>

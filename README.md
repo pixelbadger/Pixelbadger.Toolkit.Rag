@@ -5,9 +5,11 @@ An ASP.NET Core service for retrieval-augmented generation (RAG). Upload text, i
 - **Embeddings run locally.** [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (ONNX, q8 quantised, 256-d Matryoshka) via ONNX Runtime. No API key, no data leaves your machine, and the service never downloads a model.
 - **Storage is SQL Server 2025 / Azure SQL.** Documents, chunks (text and metadata), `vector(256)` embeddings and the ingest job queue live in SQL, which is also the only search index.
 - **Multimodal.** Text (`.txt`, `.md`), images and audio are each ingested as their own documents and searched together.
-- **Document-centric REST.** `POST /api/documents` uploads one or more files and returns `202` with a server-assigned document id per file; a background worker processes each file from a persistent SQL queue (it survives restarts) and you poll `GET /api/documents/{id}`. Re-ingest a document with `POST /api/documents/{id}`, delete it with `DELETE /api/documents/{id}`.
+- **Document-centric REST.** `POST /api/documents` uploads one or more files and returns `202` with a server-assigned document id per file; each file is queued as a job in SQL and processed in the background (unfinished jobs survive restarts) and you poll `GET /api/documents/{id}`. Re-ingest a document with `POST /api/documents/{id}`, delete it with `DELETE /api/documents/{id}`.
 - **MCP server.** `/mcp` exposes a single `Search` tool over Streamable HTTP. Uploading and deleting are REST-only.
 - **Browser UI.** The service serves a small React app at `/` (same origin as the API): a live jobs dashboard (`/`), a query page that shows the ranked chunks with links back to each source file (`/query`), and an upload page (`/ingest`). It is an operational UI over the REST API, not a chat interface.
+
+> **Version 6.0 changes how ingest runs. Upgrading from 5.x: upload any file that was still queued or being processed again.** Ingest is now event-driven: every job status change is published through a [SlimMessageBus](https://slimmessagebus.com) outbox on the service's own SQL database, and in-process consumers run the jobs. The polling worker and the startup reset are gone. The 6.0 migration (`EventDrivenIngest`) **deletes the jobs that were `Queued` or `Processing`** (and documents that were never indexed, which existed only for those jobs); everything else is kept, and documents keep their indexed chunks. It also turns on read-committed snapshot isolation where it is off (Azure SQL's default). The bus creates its `BusMessages*` and `BusOutbox*` tables on first start. The `Rag:Ingest:LeaseSeconds` and `PollIntervalSeconds` settings keep their names but now mean the bus message lock and the bus poll interval.
 
 > **Version 5.0 is a breaking change from 4.x: it deletes all your documents.** The embedding model moves from the fp32 to the q8 (8-bit quantised) ONNX graphs of EmbeddingGemma 2. Vectors from the two are not compatible and there is no conversion, so the 5.0 migration (`QuantizedEmbeddingsQ8`) **deletes every document, chunk and ingest job (including job history)** and replaces `dbo.Chunks_EG2_256` with `dbo.Chunks_EG2Q8_256`. Before starting 5.0, download the q8 model files (see [the model section](#2-the-embeddinggemma-2-model-local-copy)); on Azure, re-run `scripts/upload-model.sh` (or `azd up`, whose postprovision hook does it). Then upload your content again.
 
@@ -48,7 +50,7 @@ Connection string for that container:
 Server=localhost,1433;User Id=sa;Password=Pbrag_Dev_Pass1!;TrustServerCertificate=True;Encrypt=False
 ```
 
-On startup the service creates the database/tables for you by applying EF Core migrations (`Rag:ApplyMigrationsOnStartup`, on by default); the login needs permission to create them.
+On startup the service creates the database/tables for you by applying EF Core migrations (`Rag:ApplyMigrationsOnStartup`, on by default); the login needs permission to create them. The message bus creates its own tables (`BusMessages*`, `BusOutbox*`) on first start.
 
 **Approximate vector index and PREVIEW_FEATURES.** Once a chunk table holds at least 100 rows, ingestion creates a DiskANN vector index so queries use approximate `VECTOR_SEARCH`. That index is generally available in Azure SQL Database but is a **preview feature on SQL Server 2025**, where the database needs `ALTER DATABASE SCOPED CONFIGURATION SET PREVIEW_FEATURES = ON;` (the tool sets this where needed). The local preview build can lag Azure's, so if you hit problems set `Rag:ExactVectorSearch` to `true` to always use exact `VECTOR_DISTANCE` search. Results are the same up to approximation; exact search is simply slower on very large corpora.
 
@@ -83,7 +85,7 @@ Audio ingestion decodes files with `ffmpeg` (16 kHz mono). Install it and make s
 
 ### Docker
 
-Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`5.0.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string.
+Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`6.0.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string.
 
 ```bash
 docker pull ghcr.io/pixelbadger/pixelbadger.toolkit.rag:latest
@@ -130,7 +132,7 @@ Running from source serves the API only, unless `Pixelbadger.Toolkit.Rag/wwwroot
 
 The service refuses to start (with a clear message and exit code 1) when the connection string or model path is missing, or the model directory does not exist. Validation never loads the model or connects to SQL.
 
-> **One instance per database.** The ingest worker processes one job at a time and the code assumes it is the only worker: at startup any job still `Processing` is put back to `Queued` (it belonged to the previous process), and a delete cancels the running job through an in-process registry. Run exactly one instance per database; multiple instances are not supported.
+> **One instance per database.** Ingest processes one job at a time and the code assumes it is the only instance: a delete cancels the running job through an in-process registry. A job left `Processing` by a crashed or restarted process is delivered again when its bus message lock expires (`Rag:Ingest:LeaseSeconds`). Run exactly one instance per database; multiple instances are not supported.
 
 ## Deploying to Azure
 
@@ -139,8 +141,8 @@ The same AppHost describes the Azure deployment. `azd up` (or `aspire deploy`) p
 | Resource | Details |
 |---|---|
 | Azure Container Apps environment | Consumption workload profile, Log Analytics, Aspire dashboard, Azure Container Registry. |
-| Container App `rag` | The repository's `Dockerfile` image (includes ffmpeg). **4 vCPU / 8 GiB** (the Consumption profile maximum). **Scales to zero, at most one replica** (one instance owns the ingest queue). A request wakes it; it stays up while it serves requests or the ingest worker has work (see below), then scales to zero. External HTTPS ingress on port 8080. |
-| Storage queue `ingest-active` | The ingest worker's keep-alive marker, watched by the app's queue scale rule. The app gets *Storage Queue Data Contributor* only. |
+| Container App `rag` | The repository's `Dockerfile` image (includes ffmpeg). **4 vCPU / 8 GiB** (the Consumption profile maximum). **Scales to zero, at most one replica** (one instance runs the ingest consumers). A request wakes it; it stays up while it serves requests or ingest has work (see below), then scales to zero. External HTTPS ingress on port 8080. |
+| Storage queue `ingest-active` | The ingest keep-alive marker, watched by the app's queue scale rule. The app gets *Storage Queue Data Contributor* only. |
 | Azure Files share mounted at `/data` | Holds the model (`/data/models/embeddinggemma-2-onnx`). Mounted as the container's `app` user. |
 | Azure SQL Database `ragdb` | The free offer (General Purpose serverless, auto-pauses when idle), set to **bill overage** rather than pause for the rest of the month once the free allowance is used. Entra ID only: the app connects with its user-assigned managed identity (`Authentication="Active Directory Default"`), which the deployment adds to the database as `db_owner` so migrations can run at startup. |
 
@@ -161,10 +163,10 @@ Until the model is there the app exits at startup ("Model directory ... not foun
 Things to know:
 
 - **There is no authentication.** The ingress is public, so anyone with the URL can upload, delete and search. Restrict it before putting real data there (for example Container Apps IP restrictions or built-in authentication, or set the ingress to internal).
-- **Scale to zero and ingest.** The ingest worker runs inside the app. While it has work it keeps a marker message in the `ingest-active` queue, and a queue-length scale rule keeps the replica running until the worker finds the job queue empty and clears the marker, so a long ingest is not cut off when HTTP traffic stops. If the marker cannot be written (storage unreachable) the app may scale down mid-ingest: nothing is lost, the job resumes on the next start. A marker left by a crashed process expires after 2 hours, or is cleared as soon as the app next goes idle.
+- **Scale to zero and ingest.** Ingest runs inside the app. While a job is queued or running the app keeps a marker message in the `ingest-active` queue, and a queue-length scale rule keeps the replica running until no job is active and the marker is cleared, so a long ingest is not cut off when HTTP traffic stops. If the marker cannot be written (storage unreachable) the app may scale down mid-ingest: nothing is lost, the job is delivered again on the next start once its bus message lock has expired (`Rag:Ingest:LeaseSeconds`, 10 minutes by default). A marker left by a crashed process expires after 2 hours, or is cleared as soon as the app next goes idle.
 - **Cold starts.** The first request after an idle period starts the container, resumes the database (it auto-pauses when nothing uses it) and loads the model from the file share: expect it to take a while, and MCP clients may time out on that first call.
 - **Cost.** Idle costs nothing for compute; you pay per second while the app is awake (after the Consumption plan's monthly free grant), plus the database beyond its free allowance, the file share and the container registry (Basic tier, a small fixed monthly cost).
-- **Deployments briefly overlap.** Container Apps starts a new revision before it stops the old one, so for a short time two instances share the queue. Avoid deploying while ingest jobs are running (the app stays up while the queue has work, so this means after the queue drains); a job the old instance was processing is requeued by the new one at startup.
+- **Deployments briefly overlap.** Container Apps starts a new revision before it stops the old one, so for a short time two instances share the queue. Avoid deploying while ingest jobs are running (the app stays up while the queue has work, so this means after the queue drains); a job the old instance was processing is delivered again by the new one once the job's bus message lock expires.
 
 ## Configuration
 
@@ -175,15 +177,15 @@ Configuration is read from the `Rag` section: `appsettings.json`, environment va
 | `Rag:ConnectionString` | `PBRAG_CONNECTION_STRING` | | **Required.** SQL Server 2025 / Azure SQL connection string. |
 | `Rag:ModelPath` | `PBRAG_MODEL_PATH` | | **Required.** Local EmbeddingGemma 2 ONNX snapshot directory (must exist). |
 | `Rag:ExactVectorSearch` | | `false` | Always use exact `VECTOR_DISTANCE` instead of the approximate vector index. |
-| `Rag:ApplyMigrationsOnStartup` | | `true` | Apply EF Core migrations when the host starts, before the ingest worker. |
+| `Rag:ApplyMigrationsOnStartup` | | `true` | Apply EF Core migrations when the host starts, before the message bus starts. |
 | `Rag:Ingest:MaxFileSizeBytes` | | 10 MiB | Largest accepted single file. Also drives the multipart and request-body limits (`MaxFilesPerRequest x MaxFileSizeBytes` plus slack). |
 | `Rag:Ingest:MaxFilesPerRequest` | | `100` | Most files in one `POST /api/documents` request (each becomes its own document and job). |
 | `Rag:Ingest:MaxChunkCharacters` | | `20000` | Largest text chunk. A request may lower it, never raise it. |
-| `Rag:Ingest:MaxAttempts` | | `3` | How many times a job may be claimed before it is marked `Failed`. |
-| `Rag:Ingest:LeaseSeconds` | | `600` | How long a worker owns a job; the worker renews the lease while it works. A job whose lease lapses (crash, restart) is retried. |
-| `Rag:Ingest:PollIntervalSeconds` | | `2` | How often the worker polls an empty queue (a new upload wakes it immediately). |
+| `Rag:Ingest:MaxAttempts` | | `3` | How many times a job may be started after infrastructure errors before it is marked `Failed` (a problem with the file fails it at once). |
+| `Rag:Ingest:LeaseSeconds` | | `600` | Bus message lock duration: a job whose process died (crash, restart) is delivered again once the lock expires. The lock is not renewed, so this must exceed the longest ingest. |
+| `Rag:Ingest:PollIntervalSeconds` | | `2` | How often the bus polls an idle message table (a new upload is picked up immediately by the outbox sender). Also the base backoff after an infrastructure error. |
 | `Rag:Ingest:CancelTimeoutSeconds` | | `30` | How long `DELETE /api/documents/{id}` waits for the document's running job to stop before answering `409`. |
-| `ConnectionStrings:ingest-active` | | | Optional. Azure Storage queue for the ingest keep-alive marker (scale-to-zero hosting). Set by the Aspire AppHost; without it the worker does not signal. |
+| `ConnectionStrings:ingest-active` | | | Optional. Azure Storage queue for the ingest keep-alive marker (scale-to-zero hosting). Set by the Aspire AppHost; without it the keep-alive does nothing. |
 
 Search data lives only in the SQL database. `Rag:IndexPath` and `PBRAG_INDEX_PATH` are no longer read; delete any old index directory.
 
@@ -232,7 +234,7 @@ Each document has a series of ingest jobs; one job is one file for one document.
 - `indexStatus`: `Queued`, `Processing`, `Indexed` or `Failed`; it follows the latest job. `chunkCount` is the number of searchable chunks right now (the previous version stays searchable while a re-ingest is queued).
 - `latestJob.status`: `Queued`, `Processing`, `Succeeded`, `Skipped` (the file had no content, so no chunks), or `Failed` (see `error`; a problem with the file is recorded once, an infrastructure failure is retried up to `MaxAttempts` times).
 - Uploaded bytes are stored on the job until it finishes and are then discarded from it; the job history is kept. When a job **succeeds** (or is `Skipped`), its bytes become the document's **canonical source**, in the same SQL transaction that replaces the document's chunks, so the downloadable file and the searchable chunks are always the same version. `path`, `title` and `modality` also change only then. A failed job leaves the previous source, metadata and chunks as they were.
-- A worker crash or restart is safe: the job is put back in the queue (at startup, or when its lease expires) and processed again.
+- A crash or restart is safe: the job is delivered again once its bus message lock expires (`Rag:Ingest:LeaseSeconds`) and processed again.
 
 #### Create documents (batch)
 
@@ -319,7 +321,7 @@ Jobs are ordered newest first (`createdAtUtc`, then job id). Invalid parameters 
 }
 ```
 
-`path` and `chunkCount` are the job's own (its uploaded path and the chunks it produced), not the document's current values. File contents and lease details are never returned.
+`path` and `chunkCount` are the job's own (its uploaded path and the chunks it produced), not the document's current values. File contents are never returned.
 
 ### Query
 
@@ -386,7 +388,7 @@ Video and images embedded inside documents are not supported. Text, image and au
 
 ```
 Ingest:  POST /api/documents (multipart) -> validate -> SQL: Document (Queued) + job with the file bytes, one transaction -> 202 + ids
-         worker: claim job -> temp file -> modality routing (extension)
+         job consumer: begin job -> temp file -> modality routing (extension)
               text : reader -> chunker -> EmbeddingGemma 2 (text)
               image: decode -> patchify -> vision encoder -> EmbeddingGemma 2
               audio: ffmpeg -> log-mel windows -> audio encoder -> EmbeddingGemma 2
@@ -403,7 +405,7 @@ Search:  query -> embed -> SQL vector top-N (cosine) -> hydrate from SQL -> resu
 
 **Embeddings.** Model id `embeddinggemma-2-q8@256`: the q8 ONNX graphs, 256 dimensions (the first 256 of the model's Matryoshka output, re-normalised to unit length). Queries and documents use EmbeddingGemma's asymmetric prompts.
 
-**Job queue.** `dbo.IngestJobs` holds the queue: one row per job, linked to its document (a document delete cascades to its jobs). A hosted worker claims the oldest claimable job with an atomic `UPDATE ... WITH (UPDLOCK, READPAST)` that also sets a lease; the lease is renewed while the job runs, and an expired lease makes the job claimable again until `MaxAttempts` is reached. At startup (after migrations, before the worker claims anything) jobs left `Processing` by the previous process are requeued. Deleting a document cancels its running job through an in-process registry and waits for the worker to let go before removing anything; a job whose document disappears meanwhile stops quietly.
+**Job queue and events.** `dbo.IngestJobs` holds one row per job, linked to its document (a document delete cascades to its jobs). Every status change is a `JobStatusChanged` event written to the SlimMessageBus outbox in the same SQL transaction as the change, and delivered over the SQL transport (`BusMessages*` tables) to two in-process subscriptions: `ingest` runs a job when it becomes `Queued`, and `vector-index` runs when a job finishes and no job is active (it builds the vector index if it is due, purges delivered messages older than a day and lets a scale-to-zero host go idle). Each subscription has one consumer working one message at a time. The bus starts after migrations, once SQL accepts connections. Deleting a document cancels its running job through an in-process registry and waits for it to stop before removing anything; a job whose document disappears meanwhile stops quietly.
 
 **Browser UI.** `Pixelbadger.Toolkit.Rag/ClientApp` is a React + TypeScript app (Vite, Tailwind, shadcn/ui components, TanStack Query). The container build compiles it in a Node stage and copies it into the image's `wwwroot`; ASP.NET serves it from the same origin as the API, so there is no CORS and no API URL to configure.
 
@@ -427,9 +429,9 @@ npm run test -- --run  # Vitest + Testing Library + MSW
 npm run build          # type-check and build into dist/
 ```
 
-- Tests use **xUnit, FluentAssertions and Moq**. SQL-backed tests (store, pipeline, ingest queue, worker) run against a SQL Server 2025 container started by **Testcontainers** (Docker required; shared via the `SqlServer` collection fixture).
+- Tests use **xUnit, FluentAssertions and Moq**. SQL-backed tests (store, pipeline, ingest queue, message bus) run against a SQL Server 2025 container started by **Testcontainers** (Docker required; shared via the `SqlServer` collection fixture).
 - To reuse an existing SQL Server instead of starting a container, set `PBRAG_TEST_SQL_CONNECTION_STRING` to its connection string. The tests do not use the Aspire AppHost: they start their own container, so the only local requirement is Docker, as for Aspire.
-- API and MCP tests host the real application in-process with `WebApplicationFactory<Program>` (mocked search service, queue and store, no worker, no SQL, no model).
+- API and MCP tests host the real application in-process with `WebApplicationFactory<Program>` (mocked search service, queue and store, no hosted services, no SQL, no model).
 - Embedding-dependent tests use a deterministic mock embedding service. **Golden tests** that compare against the real ONNX model run only when `PBRAG_MODEL_PATH` points at a local model; otherwise they are skipped. Reference vectors are generated with the transformers.js scripts in [`tools/golden`](tools/golden), against the same q8 graphs.
 - CI (`.github/workflows`) runs on .NET 10 and Node 22. Pull requests lint, test and build the UI, build and test the .NET solution, build the container image without pushing it and, when they change `Pixelbadger.Toolkit.Rag/`, require `<Version>` to be higher than the latest `v*` git tag. A merge to `master` builds, tests and pushes the image to GHCR (tags `<Version>`, `latest`, `sha-<short>`), then creates the `v<Version>` tag; the push is refused if that tag already exists, so bump `<Version>` for every release. The registry login uses the built-in `GITHUB_TOKEN`.
 

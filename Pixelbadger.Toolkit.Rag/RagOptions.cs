@@ -16,6 +16,6 @@ public sealed class RagOptions
 
     public IngestSettings Ingest { get; set; } = new();
 
-    /// <summary>Apply EF Core migrations when the host starts, before the ingest worker runs.</summary>
+    /// <summary>Apply EF Core migrations when the host starts, before the message bus starts.</summary>
     public bool ApplyMigrationsOnStartup { get; set; } = true;
 }
