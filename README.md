@@ -330,7 +330,7 @@ curl -X POST http://localhost:8080/api/query \
 | Field | Default | Description |
 |---|---|---|
 | `query` (required) | | Query text (up to 4096 characters). |
-| `maxResults` | 10 | 1 to 100. |
+| `maxResults` | 10 | 1 to 100 documents (one result per document). |
 | `documentIds` | | Restrict results to these documents (GUIDs, up to 100). A value that is not a GUID returns `400`. |
 
 A blank query or invalid argument returns `400`. The response is `{ "results": [...] }`; each result has `score` (cosine similarity, 1 - cosine distance; higher is more similar), `chunkId`, `documentId`, `sourcePath` (the document's path), `sourceFile`, `ordinal`, `modality` (`Text`, `Image` or `Audio`), `locatorStart` / `locatorEnd` (character offsets for text, milliseconds for audio, null for images), `content` (text chunks only).
@@ -365,7 +365,7 @@ Other clients that take a JSON config:
 | Parameter | Type | Description |
 |---|---|---|
 | `query` | string, required | The search query. |
-| `maxResults` | int, default 5 | Maximum number of results (1 to 100). |
+| `maxResults` | int, default 5 | Maximum number of results (1 to 100), one per document. |
 | `documentIds` | string[], optional | Restrict results to specific documents (GUIDs). A value that is not a GUID is returned as a tool error. |
 
 There is no search-mode parameter: every search is a vector search. Results carry the chunk id, document id, source, modality, locator and content. All returned content is framed as **untrusted document text**: clients must treat it as data, not instructions. Invalid arguments return their message as a tool error; unexpected failures return a generic error and are logged.
@@ -397,7 +397,7 @@ Search:  query -> embed -> SQL vector top-N (cosine) -> hydrate from SQL -> resu
 
 **Domain model.** A `Document` is one uploaded file; it has an integer primary key and a unique `Guid` global id assigned by the server when it is created (a version 7 GUID; the path plays no part in it). A `Document` has many `Chunk`s and many ingest jobs; a chunk has an integer clustered primary key, a unique `Guid` global id (shown to users as the chunk id), the document foreign key, its ordinal, modality, locator range, text (text chunks only) and the 256-d embedding. Chunks are stored in `dbo.Chunks_EG2_256`. The `EG2_256` suffix names the model and dimension; changing either means a new table and a full re-embed.
 
-**Vector search.** The query is embedded and the `n` nearest chunks by cosine distance are fetched from SQL (approximate DiskANN `VECTOR_SEARCH` when the index exists, otherwise exact `VECTOR_DISTANCE`). Results are hydrated from SQL and keep that order; `score` is `1 - distance`.
+**Vector search.** The query is embedded and the `n` nearest documents by cosine distance are fetched from SQL, each represented by its nearest chunk, so one long document cannot fill the results with its own chunks (approximate DiskANN `VECTOR_SEARCH` over-fetches candidate chunks when the index exists and falls back to exact `VECTOR_DISTANCE` when they cover fewer than `n` documents; otherwise exact). Results are hydrated from SQL and keep that order; `score` is `1 - distance`.
 
 **Embeddings.** 256 dimensions (the first 256 of the model's Matryoshka output, re-normalised to unit length). Queries and documents use EmbeddingGemma's asymmetric prompts.
 

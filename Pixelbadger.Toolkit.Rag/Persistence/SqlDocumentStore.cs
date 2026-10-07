@@ -28,8 +28,8 @@ namespace Pixelbadger.Toolkit.Rag.Persistence;
 /// (<c>WITH APPROXIMATE</c> is therefore [verify] against Azure SQL / a newer build).</item>
 /// <item>Joins and <c>WHERE</c> filters in the same statement as legacy <c>VECTOR_SEARCH ... TOP_N</c> are POST-filters
 /// over the TOP_N candidates (e.g. TOP_N = 100 filtered to two documents' sources returned 5 rows of the 100).
-/// Filtered searches therefore over-fetch candidates and fall back to an exact filtered scan when
-/// fewer than <c>maxResults</c> rows survive the filter.</item>
+/// Approximate searches therefore over-fetch candidate chunks (also because only the nearest chunk of each document
+/// is kept) and fall back to an exact scan when fewer than <c>maxResults</c> documents survive.</item>
 /// <item><c>SqlVector&lt;float&gt;</c> binds as a parameter (<c>SqlDbType.Vector</c> or inferred), reads back via
 /// <c>GetFieldValue&lt;SqlVector&lt;float&gt;&gt;</c>, and <c>SqlBulkCopy</c> works with vector columns (both
 /// DataTable and DataReader sources). Writes still go through EF Core batched INSERTs because chunk ids must be
@@ -50,9 +50,9 @@ public sealed class SqlDocumentStore : IDocumentStore
     /// <summary>Error raised for DML against a table with a read-only (pre-v3) vector index.</summary>
     private const int VectorIndexReadOnlyError = 42231;
 
-    private const int FilteredCandidateMultiplier = 20;
-    private const int MinFilteredCandidates = 200;
-    private const int MaxFilteredCandidates = 5000;
+    private const int CandidateMultiplier = 20;
+    private const int MinCandidates = 200;
+    private const int MaxCandidates = 5000;
 
     private const string ChunksTableSql = "dbo." + RagDbContext.ChunksTable;
 
@@ -332,19 +332,24 @@ public sealed class SqlDocumentStore : IDocumentStore
         Guid[]? filter,
         CancellationToken ct)
     {
+        // One hit per document, so always over-fetch chunks: a long document can fill many of the nearest slots.
+        var candidates = Math.Clamp(maxResults * CandidateMultiplier, MinCandidates, MaxCandidates);
+
         // Preferred (v3+): TOP (n) WITH APPROXIMATE, where filters are applied during the search.
         if (state.Kind == VectorIndexKind.Writable && !_approximateSyntaxDisabled)
         {
             try
             {
-                var hits = await RunApproximateAsync(conn, vector, maxResults, filter, withApproximate: true, candidates: maxResults, ct);
-                if (filter is null || hits.Count >= maxResults)
+                var chunks = await RunApproximateAsync(conn, vector, filter, withApproximate: true, candidates, ct);
+                var hits = BestPerDocument(chunks, maxResults);
+                // Fewer chunks than asked for means none are left, so the per-document list is complete.
+                if (hits.Count >= maxResults || chunks.Count < candidates)
                 {
                     LastSearchPath = SearchPath.ApproximateWithApproximate;
                     return hits;
                 }
 
-                return null; // selective filter: exact scan below is authoritative
+                return null; // too few distinct documents among the candidates: exact scan below is authoritative
             }
             catch (SqlException) when (!ct.IsCancellationRequested)
             {
@@ -352,16 +357,15 @@ public sealed class SqlDocumentStore : IDocumentStore
             }
         }
 
-        // Legacy: VECTOR_SEARCH(..., TOP_N = n). WHERE/JOIN filters are post-filters, so over-fetch when filtering.
+        // Legacy: VECTOR_SEARCH(..., TOP_N = n). WHERE/JOIN filters are post-filters over the n candidates.
         if (!_topNSyntaxDisabled)
         {
             try
             {
-                var candidates = filter is null
-                    ? maxResults
-                    : Math.Clamp(maxResults * FilteredCandidateMultiplier, MinFilteredCandidates, MaxFilteredCandidates);
-                var hits = await RunApproximateAsync(conn, vector, maxResults, filter, withApproximate: false, candidates, ct);
-                if (filter is null || hits.Count >= maxResults)
+                var chunks = await RunApproximateAsync(conn, vector, filter, withApproximate: false, candidates, ct);
+                var hits = BestPerDocument(chunks, maxResults);
+                // Without a filter, fewer than n candidates means the table is exhausted; with one, nothing is known.
+                if (hits.Count >= maxResults || (filter is null && chunks.Count < candidates))
                 {
                     LastSearchPath = SearchPath.ApproximateTopN;
                     return hits;
@@ -378,19 +382,33 @@ public sealed class SqlDocumentStore : IDocumentStore
         return null;
     }
 
-    private static async Task<IReadOnlyList<VectorHit>> RunApproximateAsync(
-        SqlConnection conn, SqlVector<float> vector, int maxResults, Guid[]? filter, bool withApproximate, int candidates, CancellationToken ct)
+    /// <summary>The nearest chunk of each document, in ascending distance (the input is already in that order).</summary>
+    private static List<VectorHit> BestPerDocument(IReadOnlyList<ChunkCandidate> chunks, int maxResults)
+    {
+        var seen = new HashSet<int>();
+        var hits = new List<VectorHit>(maxResults);
+        foreach (var chunk in chunks)
+        {
+            if (hits.Count == maxResults) break;
+            if (seen.Add(chunk.DocumentId)) hits.Add(new VectorHit(chunk.ChunkId, chunk.Distance));
+        }
+
+        return hits;
+    }
+
+    private static async Task<IReadOnlyList<ChunkCandidate>> RunApproximateAsync(
+        SqlConnection conn, SqlVector<float> vector, Guid[]? filter, bool withApproximate, int candidates, CancellationToken ct)
     {
         var sql = new StringBuilder();
         if (withApproximate)
         {
-            sql.Append("SELECT TOP (@k) WITH APPROXIMATE c.ChunkId, s.distance FROM VECTOR_SEARCH(TABLE = ")
+            sql.Append("SELECT TOP (@k) WITH APPROXIMATE c.ChunkId, c.DocumentId, s.distance FROM VECTOR_SEARCH(TABLE = ")
                .Append(ChunksTableSql)
                .Append(" AS c, COLUMN = Embedding, SIMILAR_TO = @q, METRIC = 'cosine') AS s");
         }
         else
         {
-            sql.Append("SELECT TOP (@k) c.ChunkId, s.distance FROM VECTOR_SEARCH(TABLE = ")
+            sql.Append("SELECT TOP (@k) c.ChunkId, c.DocumentId, s.distance FROM VECTOR_SEARCH(TABLE = ")
                .Append(ChunksTableSql)
                .Append(" AS c, COLUMN = Embedding, SIMILAR_TO = @q, METRIC = 'cosine', TOP_N = @n) AS s");
         }
@@ -400,25 +418,34 @@ public sealed class SqlDocumentStore : IDocumentStore
         sql.Append(" ORDER BY s.distance, c.ChunkId");
         cmd.CommandText = sql.ToString();
         AddVector(cmd, vector);
-        cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.Int) { Value = withApproximate ? candidates : maxResults });
+        cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.Int) { Value = candidates });
         if (!withApproximate) cmd.Parameters.Add(new SqlParameter("@n", SqlDbType.Int) { Value = candidates });
 
-        return await ReadHitsAsync(cmd, ct);
+        var chunks = new List<ChunkCandidate>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            chunks.Add(new ChunkCandidate(reader.GetInt32(0), reader.GetInt32(1), Convert.ToSingle(reader.GetValue(2))));
+        return chunks;
     }
 
     private static async Task<IReadOnlyList<VectorHit>> ExactSearchAsync(
         SqlConnection conn, SqlVector<float> vector, int maxResults, Guid[]? filter, CancellationToken ct)
     {
-        var sql = new StringBuilder("SELECT TOP (@k) c.ChunkId, VECTOR_DISTANCE('cosine', c.Embedding, @q) AS distance FROM ")
+        // Rank each document's chunks by distance and keep its nearest one.
+        var sql = new StringBuilder("SELECT TOP (@k) r.ChunkId, r.distance FROM (SELECT x.ChunkId, x.distance, ")
+            .Append("ROW_NUMBER() OVER (PARTITION BY x.DocumentId ORDER BY x.distance, x.ChunkId) AS rn FROM (")
+            .Append("SELECT c.ChunkId, c.DocumentId, VECTOR_DISTANCE('cosine', c.Embedding, @q) AS distance FROM ")
             .Append(ChunksTableSql).Append(" AS c");
         using var cmd = new SqlCommand { Connection = conn };
         AppendFilter(sql, cmd, filter);
-        sql.Append(" ORDER BY distance, c.ChunkId");
+        sql.Append(") AS x) AS r WHERE r.rn = 1 ORDER BY r.distance, r.ChunkId");
         cmd.CommandText = sql.ToString();
         AddVector(cmd, vector);
         cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.Int) { Value = maxResults });
         return await ReadHitsAsync(cmd, ct);
     }
+
+    private sealed record ChunkCandidate(int ChunkId, int DocumentId, float Distance);
 
     private static void AppendFilter(StringBuilder sql, SqlCommand cmd, Guid[]? filter)
     {

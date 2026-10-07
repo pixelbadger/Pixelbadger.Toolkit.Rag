@@ -13,10 +13,10 @@ namespace Pixelbadger.Toolkit.Rag.Mcp;
 [McpServerToolType]
 public sealed class McpRagServer(ISearchService searchService, ILogger<McpRagServer> logger)
 {
-    [McpServerTool(Name = "Search"), Description("Semantic vector search over indexed text, image and audio documents.")]
+    [McpServerTool(Name = "Search"), Description("Semantic vector search over indexed text, image and audio documents. Returns one result per document: its best-matching chunk.")]
     public async Task<CallToolResult> Search(
         [Description("The search query to be performed.")] string query,
-        [Description("Maximum number of results to return (default: 5).")] int maxResults = 5,
+        [Description("Maximum number of results (documents) to return (default: 5).")] int maxResults = 5,
         [Description("Optional array of document IDs (GUIDs) to constrain search results to specific documents.")] string[]? documentIds = null,
         CancellationToken cancellationToken = default)
     {

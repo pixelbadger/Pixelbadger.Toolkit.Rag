@@ -117,8 +117,10 @@ public sealed class InMemoryDocumentStore : IDocumentStore
         {
             var hits = _rows
                 .Where(r => documentIds == null || documentIds.Count == 0 || documentIds.Contains(r.Record.DocumentGlobalId))
-                .Select(r => new VectorHit(r.Record.ChunkId, 1f - Dot(queryEmbedding, r.Embedding)))
-                .OrderBy(h => h.Distance)
+                .Select(r => (r.Record.DocumentId, Hit: new VectorHit(r.Record.ChunkId, 1f - Dot(queryEmbedding, r.Embedding))))
+                .OrderBy(x => x.Hit.Distance)
+                .DistinctBy(x => x.DocumentId)
+                .Select(x => x.Hit)
                 .Take(maxResults)
                 .ToList();
             return Task.FromResult<IReadOnlyList<VectorHit>>(hits);
