@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Pixelbadger.Toolkit.Rag.Components.FileReaders;
 using Pixelbadger.Toolkit.Rag.Embeddings;
 using Pixelbadger.Toolkit.Rag.Embeddings.Audio;
@@ -40,6 +41,8 @@ public static class DependencyInjection
         services.AddSingleton<IngestWorkerSignal>();
         services.AddSingleton<IngestJobRegistry>();
         services.AddSingleton<InFlightJobRecovery>();
+        // Program registers QueueIngestKeepAlive first when the keep-alive queue is configured (Azure Container Apps).
+        services.TryAddSingleton<IIngestKeepAlive, NoIngestKeepAlive>();
         services.AddTransient<DocumentService>();
 
         // Serialises SQL + Lucene writes (ingest) against document deletes; single-process assumption, see the class.

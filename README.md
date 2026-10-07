@@ -132,9 +132,10 @@ The same AppHost describes the Azure deployment. `azd up` (or `aspire deploy`) p
 | Resource | Details |
 |---|---|
 | Azure Container Apps environment | Consumption workload profile, Log Analytics, Aspire dashboard, Azure Container Registry. |
-| Container App `rag` | The repository's `Dockerfile` image (includes ffmpeg). **4 vCPU / 8 GiB** (the Consumption profile maximum), **exactly one replica** (min 1, max 1: one instance owns the index and the queue, and the ingest worker must keep running). External HTTPS ingress on port 8080. |
+| Container App `rag` | The repository's `Dockerfile` image (includes ffmpeg). **4 vCPU / 8 GiB** (the Consumption profile maximum). **Scales to zero, at most one replica** (one instance owns the index and the queue). A request wakes it; it stays up while it serves requests or the ingest worker has work (see below), then scales to zero. External HTTPS ingress on port 8080. |
+| Storage queue `ingest-active` | The ingest worker's keep-alive marker, watched by the app's queue scale rule. The app gets *Storage Queue Data Contributor* only. |
 | Azure Files share mounted at `/data` | Holds the Lucene index (`/data/index`) and the model (`/data/models/embeddinggemma-2-onnx`). Mounted as the container's `app` user. |
-| Azure SQL Database `ragdb` | General Purpose serverless `GP_S_Gen5_2` (0.5–2 vCores). Entra ID only: the app connects with its user-assigned managed identity (`Authentication="Active Directory Default"`), which the deployment adds to the database as `db_owner` so migrations can run at startup. |
+| Azure SQL Database `ragdb` | The free offer (General Purpose serverless, auto-pauses when idle), set to **bill overage** rather than pause for the rest of the month once the free allowance is used. Entra ID only: the app connects with its user-assigned managed identity (`Authentication="Active Directory Default"`), which the deployment adds to the database as `db_owner` so migrations can run at startup. |
 
 ```bash
 az login && azd auth login
@@ -153,8 +154,10 @@ Until the model is there the app exits at startup ("Model directory ... not foun
 Things to know:
 
 - **There is no authentication.** The ingress is public, so anyone with the URL can upload, delete and search. Restrict it before putting real data there (for example Container Apps IP restrictions or built-in authentication, or set the ingress to internal).
-- **Cost.** The app runs one 4 vCPU / 8 GiB replica around the clock. The worker polls the queue every `Rag:Ingest:PollIntervalSeconds` (2 s), so the serverless database never auto-pauses: expect to pay at least its minimum capacity continuously.
-- **Deployments briefly overlap.** Container Apps starts a new revision before it stops the old one, so for a short time two instances share the index and the queue. Avoid deploying while ingest jobs are running; a job the old instance was processing is requeued by the new one at startup.
+- **Scale to zero and ingest.** The ingest worker runs inside the app. While it has work it keeps a marker message in the `ingest-active` queue, and a queue-length scale rule keeps the replica running until the worker finds the job queue empty and clears the marker, so a long ingest is not cut off when HTTP traffic stops. If the marker cannot be written (storage unreachable) the app may scale down mid-ingest: nothing is lost, the job resumes on the next start. A marker left by a crashed process expires after 2 hours, or is cleared as soon as the app next goes idle.
+- **Cold starts.** The first request after an idle period starts the container, resumes the database (it auto-pauses when nothing uses it) and loads the model from the file share: expect it to take a while, and MCP clients may time out on that first call.
+- **Cost.** Idle costs nothing for compute; you pay per second while the app is awake (after the Consumption plan's monthly free grant), plus the database beyond its free allowance, the file share and the container registry (Basic tier, a small fixed monthly cost).
+- **Deployments briefly overlap.** Container Apps starts a new revision before it stops the old one, so for a short time two instances share the index and the queue. Avoid deploying while ingest jobs are running (the app stays up while the queue has work, so this means after the queue drains); a job the old instance was processing is requeued by the new one at startup.
 - **Lucene on Azure Files (SMB).** The index lives on a network share (`nobrl` mount option: Lucene's lock file uses client-side locks, which is safe with one instance). Expect slower ingest and BM25 queries than on local disk.
 
 ## Configuration
@@ -175,6 +178,7 @@ Configuration is read from the `Rag` section: `appsettings.json`, environment va
 | `Rag:Ingest:LeaseSeconds` | | `600` | How long a worker owns a job; the worker renews the lease while it works. A job whose lease lapses (crash, restart) is retried. |
 | `Rag:Ingest:PollIntervalSeconds` | | `2` | How often the worker polls an empty queue (a new upload wakes it immediately). |
 | `Rag:Ingest:CancelTimeoutSeconds` | | `30` | How long `DELETE /api/documents/{id}` waits for the document's running job to stop before answering `409`. |
+| `ConnectionStrings:ingest-active` | | | Optional. Azure Storage queue for the ingest keep-alive marker (scale-to-zero hosting). Set by the Aspire AppHost; without it the worker does not signal. |
 
 The SQL database and the Lucene index belong together: use one index directory per SQL database, and re-upload your documents if you delete either.
 

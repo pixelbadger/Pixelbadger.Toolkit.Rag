@@ -24,7 +24,7 @@ public abstract class IngestWorkerBehaviorTests
 
     protected sealed class Harness(
         IngestWorker worker, IIngestQueue queue, Mock<IContentIngester> ingester, Mock<IDocumentStore> store,
-        IngestSettings settings, IngestJobRegistry registry)
+        IngestSettings settings, IngestJobRegistry registry, RecordingKeepAlive keepAlive)
     {
         public IngestWorker Worker { get; } = worker;
         public IIngestQueue Queue { get; } = queue;
@@ -32,6 +32,7 @@ public abstract class IngestWorkerBehaviorTests
         public Mock<IDocumentStore> Store { get; } = store;
         public IngestSettings Settings { get; } = settings;
         public IngestJobRegistry Registry { get; } = registry;
+        public RecordingKeepAlive KeepAlive { get; } = keepAlive;
 
         public async Task<EnqueuedDocument> EnqueueAsync(string path, string content, int maxChunk = 1000) =>
             (await EnqueueManyAsync(maxChunk, (path, content)))[0];
@@ -57,10 +58,29 @@ public abstract class IngestWorkerBehaviorTests
             .BuildServiceProvider();
         var scopes = services.GetRequiredService<IServiceScopeFactory>();
         var registry = new IngestJobRegistry();
+        var keepAlive = new RecordingKeepAlive();
         var worker = new IngestWorker(
             scopes, settings, new IngestWorkerSignal(), registry,
-            new InFlightJobRecovery(scopes, NullLogger<InFlightJobRecovery>.Instance), NullLogger<IngestWorker>.Instance);
-        return new Harness(worker, queue, ingester, store, settings, registry);
+            new InFlightJobRecovery(scopes, NullLogger<InFlightJobRecovery>.Instance), keepAlive, NullLogger<IngestWorker>.Instance);
+        return new Harness(worker, queue, ingester, store, settings, registry, keepAlive);
+    }
+
+    /// <summary>Records the keep-alive calls in order ("busy" / "idle").</summary>
+    protected sealed class RecordingKeepAlive : IIngestKeepAlive
+    {
+        public List<string> Calls { get; } = [];
+
+        public Task MarkBusyAsync(CancellationToken cancellationToken)
+        {
+            lock (Calls) Calls.Add("busy");
+            return Task.CompletedTask;
+        }
+
+        public Task MarkIdleAsync(CancellationToken cancellationToken)
+        {
+            lock (Calls) Calls.Add("idle");
+            return Task.CompletedTask;
+        }
     }
 
     /// <summary>Succeeds with one chunk; records what the ingester saw on disk.</summary>
@@ -113,6 +133,31 @@ public abstract class IngestWorkerBehaviorTests
 
         Directory.Exists(JobTempDirectory(created.JobId)).Should().BeFalse();
         File.Exists(call.Local).Should().BeFalse();
+    }
+
+    [SkippableFact]
+    public async Task KeepAlive_IsBusyFromTheClaim_UntilTheWorkerIsIdle()
+    {
+        var h = await NewHarnessAsync();
+        var callsWhenIngesting = new List<string>();
+        h.Ingester
+            .Setup(i => i.IngestAsync(It.IsAny<IngestSource>(), It.IsAny<IngestOptions?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((IngestSource s, IngestOptions? _, CancellationToken _) =>
+            {
+                lock (h.KeepAlive.Calls) callsWhenIngesting.AddRange(h.KeepAlive.Calls);
+                return new IngestResult(s.LogicalPath, s.DocumentId, Modality.Text, 1);
+            });
+
+        (await h.Worker.ProcessNextAsync(CancellationToken.None)).Should().BeFalse();
+        h.KeepAlive.Calls.Should().BeEmpty("nothing was claimed");
+
+        await h.EnqueueAsync("a.txt", "a");
+        (await h.Worker.ProcessNextAsync(CancellationToken.None)).Should().BeTrue();
+        callsWhenIngesting.Should().Equal(["busy"], "the host must stay up while the job runs");
+
+        await h.Worker.IdleAsync(CancellationToken.None);
+        h.KeepAlive.Calls.Should().Equal("busy", "idle");
+        h.Store.Verify(s => s.EnsureVectorIndexAsync(It.IsAny<CancellationToken>()), Times.Once, "idle work happens before the host may stop");
     }
 
     [SkippableFact]

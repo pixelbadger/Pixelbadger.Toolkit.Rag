@@ -29,7 +29,7 @@ A .NET 10 ASP.NET Core app (minimal APIs, v3.x, shipped as a container) for Retr
 - Documents: **upload only** (`POST /api/documents`, batch allowed); the server never reads caller-named paths from its own disk. A document's id is a server-assigned `Guid` (v7) created with the upload; the *logical path* (the multipart filename) is metadata only and may repeat. One job = one file for one document; jobs live in SQL and are processed by a hosted worker.
 - **Single-instance assumption.** One instance owns a Lucene index directory (multi-instance is unsupported), and the code leans on it in three marked places: startup resets `Processing` jobs to `Queued` (`ResetInFlightJobsAsync`), `IngestJobRegistry` cancels in-process jobs on document delete, and `IndexWriteGate` serialises SQL+Lucene writes with deletes. If the app is ever scaled out, revisit all three (and rely on lease expiry instead of the reset).
 - Auth is out of scope.
-- Orchestration: .NET Aspire 13.6. `Pixelbadger.Toolkit.Rag.AppHost` runs SQL Server 2025 (container) + the app (project) locally, and publishes to Azure (`azd up` / `aspire deploy`): Azure SQL Database (`GP_S_Gen5_2` serverless, Entra ID via the app's managed identity) + the Dockerfile image on Azure Container Apps (Consumption profile, 4 vCPU / 8 GiB, min = max = 1 replica) with one Azure Files share at `/data` (index + model). The app references `Pixelbadger.Toolkit.Rag.ServiceDefaults` (OpenTelemetry only).
+- Orchestration: .NET Aspire 13.6. `Pixelbadger.Toolkit.Rag.AppHost` runs SQL Server 2025 (container) + the app (project) locally, and publishes to Azure (`azd up` / `aspire deploy`): Azure SQL Database (free offer, bill overage; Entra ID via the app's managed identity) + the Dockerfile image on Azure Container Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, max 1 replica) with one Azure Files share at `/data` (index + model) and the `ingest-active` storage queue (ingest keep-alive). The app references `Pixelbadger.Toolkit.Rag.ServiceDefaults` (OpenTelemetry only).
 - Multimodal: each image / audio file is its own document. Video and images inside documents are out of scope.
 
 ## Quick Reference
@@ -92,6 +92,7 @@ Pixelbadger.Toolkit.Rag/
 │   ├── DatabaseMigrationHostedService.cs # Runs migrations first (registered first), then InFlightJobRecoveryHostedService, then the worker
 │   ├── IngestRequestValidator.cs # Upload validation incl. safe logical paths
 │   ├── IngestWorkerSignal.cs   # In-process nudge so uploads are picked up immediately
+│   ├── IIngestKeepAlive.cs, QueueIngestKeepAlive.cs # Busy marker in a storage queue (scale-to-zero hosts stay up while jobs remain); no-op default
 │   └── IngestSettings.cs       # Rag:Ingest limits/timings
 ├── Mcp/
 │   ├── McpRagServer.cs         # MCP tool class (DI-resolved per call): Search
@@ -254,6 +255,7 @@ Ingester tests go through `PipelineHarness.IngestAsync(path)` (logical path = pa
 - Azure SQL uses `Authentication="Active Directory Default"`; SqlClient 7 needs `Microsoft.Data.SqlClient.Extensions.Azure` for that (`Tests/Host/SqlAuthenticationTests` guards it).
 - Check infrastructure changes with `aspire publish -o <dir>` and read the generated Bicep (`rag/rag.bicep`, `env/env.bicep`, `sql/sql.bicep`).
 - Container Apps starts a new revision before stopping the old one, so a deploy briefly breaks the single-instance assumption (see Key decisions).
+- Scale to zero with the worker in-process: the worker calls `IIngestKeepAlive.MarkBusyAsync` after each claim (and from the job heartbeat) and `MarkIdleAsync` from `IdleAsync` (after the vector index build). `QueueIngestKeepAlive` keeps one visible marker message (TTL 2 h, refreshed every 30 min) in the `ingest-active` queue and clears the queue when idle; the ACA scale rules are `http` + `azureQueue` (`QueueLength = 1`, the app identity). It never throws (logs once per outage). Registered by `Program.cs` only when `ConnectionStrings:ingest-active` is set, otherwise `NoIngestKeepAlive`. The queue name is duplicated as a constant in `AppHost.cs` (the AppHost does not reference the app assembly).
 - Tests do not use the AppHost: SQL-backed tests start their own SQL Server via Testcontainers (Docker is the only requirement, as for Aspire locally).
 
 ## CI/CD
