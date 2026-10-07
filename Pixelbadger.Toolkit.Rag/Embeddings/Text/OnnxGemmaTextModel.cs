@@ -3,7 +3,7 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Text;
 
-/// <summary>The text graph (<c>model.onnx</c>), which also performs the multimodal merge. Seam for tests.</summary>
+/// <summary>The text graph (<c>model_quantized.onnx</c>), which also performs the multimodal merge. Seam for tests.</summary>
 public interface IGemmaTextModel
 {
     /// <summary>

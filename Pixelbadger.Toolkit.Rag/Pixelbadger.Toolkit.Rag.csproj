@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
 
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <Version>4.2.0</Version>
+    <Version>5.0.0</Version>
     <Authors>Pixelbadger</Authors>
     <Description>An ASP.NET Core service for RAG (Retrieval-Augmented Generation) workflows: queued multipart ingest, REST query and an MCP (Streamable HTTP) Search tool over vector search (SQL Server) of text, image and audio documents embedded locally with EmbeddingGemma 2 (ONNX).</Description>
     <RepositoryUrl>https://github.com/pixelbadger/Pixelbadger.Toolkit.Rag</RepositoryUrl>

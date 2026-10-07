@@ -4,7 +4,7 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Audio;
 
 /// <summary>
-/// Runs <c>audio_encoder.onnx</c>: <c>input_features</c> float32 [clips, frames, 128] and <c>input_features_mask</c> bool
+/// Runs <c>audio_encoder_quantized.onnx</c>: <c>input_features</c> float32 [clips, frames, 128] and <c>input_features_mask</c> bool
 /// [clips, frames] to <c>audio_features</c> float32 [tokens, 512] (valid tokens flattened across clips in order).
 /// The session is loaded lazily by <see cref="OnnxSessionProvider"/>. [verify] untested against the real model.
 /// </summary>

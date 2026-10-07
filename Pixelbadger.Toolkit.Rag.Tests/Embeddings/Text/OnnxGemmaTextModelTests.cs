@@ -10,7 +10,7 @@ namespace Pixelbadger.Toolkit.Rag.Tests.Embeddings.Text;
 
 /// <summary>
 /// Exercises the real ONNX Runtime plumbing (OrtValue creation, empty [0,512] tensors, output extraction, cancellation)
-/// against a tiny synthetic graph with the same I/O contract as model.onnx (tools/golden/make_tiny_text_graph.py).
+/// against a tiny synthetic graph with the same I/O contract as model_quantized.onnx (tools/golden/make_tiny_text_graph.py).
 /// The row value is sum(ids*mask) + 1000*sum(image) + 1e6*sum(audio) + 1e-3*sum(video); output[b, j] = value[b] + j.
 /// </summary>
 public sealed class OnnxGemmaTextModelTests : IDisposable
@@ -24,9 +24,8 @@ public sealed class OnnxGemmaTextModelTests : IDisposable
     {
         _modelDir = Path.Combine(Path.GetTempPath(), "pbrag-tiny-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(_modelDir, "onnx"));
-        File.Copy(Path.Combine(TestModelPaths.GoldenDir, "synthetic", "tiny_text_graph.onnx"), Path.Combine(_modelDir, "onnx", "model.onnx"));
-
         _options = new EmbeddingModelOptions { ModelPath = _modelDir };
+        File.Copy(Path.Combine(TestModelPaths.GoldenDir, "synthetic", "tiny_text_graph.onnx"), _options.Resolve(_options.TextModelFile));
         _sessions = new OnnxSessionProvider(_options);
         _model = new OnnxGemmaTextModel(_sessions);
     }

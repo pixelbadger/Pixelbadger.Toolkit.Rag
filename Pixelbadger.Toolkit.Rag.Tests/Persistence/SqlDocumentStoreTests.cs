@@ -47,7 +47,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     }
 
     private static Task<int> VectorIndexCountAsync(string cs)
-        => ScalarAsync<int>(cs, "SELECT COUNT(*) FROM sys.vector_indexes WHERE object_id = OBJECT_ID(N'dbo.Chunks_EG2_256')");
+        => ScalarAsync<int>(cs, "SELECT COUNT(*) FROM sys.vector_indexes WHERE object_id = OBJECT_ID(N'dbo.Chunks_EG2Q8_256')");
 
     /// <summary>Ingests <paramref name="documents"/> x <paramref name="chunksPerDoc"/> deterministic chunks; returns name to document id.</summary>
     private static async Task<Dictionary<string, Guid>> PopulateAsync(
@@ -70,10 +70,10 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         var (store, cs) = await CreateMigratedStoreAsync();
         await store.MigrateAsync();
 
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM sys.tables WHERE name IN ('Documents','Chunks_EG2_256')")).Should().Be(2);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM sys.tables WHERE name IN ('Documents','Chunks_EG2Q8_256')")).Should().Be(2);
         (await ScalarAsync<string>(cs, "SELECT TYPE_NAME(user_type_id) + CAST(max_length AS varchar) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.Documents') AND name = 'IndexStatus'"))
             .Should().Be("tinyint1");
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.Chunks_EG2_256') AND name = 'Embedding' AND TYPE_NAME(user_type_id) = 'vector'"))
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.Chunks_EG2Q8_256') AND name = 'Embedding' AND TYPE_NAME(user_type_id) = 'vector'"))
             .Should().Be(1);
         // Migrations must not create the vector index (100-row minimum).
         (await VectorIndexCountAsync(cs)).Should().Be(0);
@@ -147,7 +147,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
 
         (await act.Should().ThrowAsync<DocumentNotFoundException>()).Which.DocumentId.Should().Be(unknown);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(0);
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(0);
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
 
         await act.Should().ThrowAsync<DocumentNotFoundException>();
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(0);
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(0);
     }
 
     [Fact]
@@ -182,7 +182,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         second.Select(r => r.Title).Should().OnlyContain(t => t == "renamed");
 
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(1);
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(2);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(2);
         (await ScalarAsync<string>(cs, "SELECT ContentHash FROM dbo.Documents")).Should().Be(new string('b', 64));
         (await store.GetChunksAsync(first.Select(r => r.ChunkId).ToList())).Should().BeEmpty();
     }
@@ -194,7 +194,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         var id = await NewDocAsync(cs, "alpha");
         await store.ReplaceDocumentAsync(id, Doc("alpha"), Chunks("a", 3));
         await store.ReplaceDocumentAsync(id, Doc("alpha"), []);
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(0);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(1);
     }
 
@@ -223,7 +223,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         var act = () => store.ReplaceDocumentAsync(id, draft with { Title = new string('x', 1200) }, Chunks("v2", 2));
         await act.Should().ThrowAsync<Exception>();
 
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(3);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(3);
         (await ScalarAsync<string>(cs, "SELECT Title FROM dbo.Documents")).Should().Be("alpha.txt");
     }
 
@@ -238,7 +238,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
 
         (await store.DeleteDocumentAsync(alpha)).Should().BeTrue();
 
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(2);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(2);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(1);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs")).Should().Be(1);
         (await store.DeleteDocumentAsync(alpha)).Should().BeFalse();
@@ -262,7 +262,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
             await del.ExecuteNonQueryAsync();
         }
 
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(2);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(2);
     }
 
     [Fact]
@@ -527,7 +527,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         var hits = await store.SearchAsync(replacement.Embedding, 3, null);
         hits[0].Distance.Should().BeApproximately(0f, 1e-3f);
         (await store.GetChunksAsync([hits[0].ChunkId])).Single().DocumentGlobalId.Should().Be(ids["p4"]);
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(111);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(111);
 
         // The ingester calls Ensure after each batch: the index comes back.
         await store.EnsureVectorIndexAsync();
@@ -545,7 +545,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         // A pre-v3 index makes the chunk table read-only (deletes fail too); the store drops it first.
         (await store.DeleteDocumentAsync(ids["p2"])).Should().BeTrue();
 
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(110);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(110);
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Documents")).Should().Be(11);
         await store.EnsureVectorIndexAsync();
         (await VectorIndexCountAsync(cs)).Should().Be(1);
@@ -578,7 +578,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         content.Bytes.Should().Equal(bytes);
         content.ContentType.Should().Be("text/plain");
         content.FileName.Should().Be("doc.txt");
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(2);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(2);
     }
 
     [SkippableFact]
@@ -603,7 +603,7 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
 
         await act.Should().ThrowAsync<DocumentNotFoundException>();
         (await store.GetContentAsync(ghost)).Should().BeNull();
-        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(0);
     }
 
     [SkippableFact]

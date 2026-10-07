@@ -1,7 +1,7 @@
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Audio;
 
 /// <summary>
-/// One audio window ready for audio_encoder.onnx.
+/// One audio window ready for audio_encoder_quantized.onnx.
 /// InputFeatures: row-major [Clips, Frames, 128] log-mel.
 /// Mask: row-major [Clips, Frames], true for real (non-padding) frames.
 /// </summary>

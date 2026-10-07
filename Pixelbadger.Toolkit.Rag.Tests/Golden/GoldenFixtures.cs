@@ -45,7 +45,11 @@ public static class GoldenFixtures
     public static string RequireModelAndFixtures()
     {
         Skip.If(TestModelPaths.ModelPath is null, TestModelPaths.SkipReason);
-        Skip.IfNot(File.Exists(Path.Combine(Dir, "manifest.json")), "golden fixtures not generated (see tools/golden/README.md)");
+        var manifest = Path.Combine(Dir, "manifest.json");
+        Skip.IfNot(File.Exists(manifest), "golden fixtures not generated (see tools/golden/README.md)");
+        using var doc = JsonDocument.Parse(File.ReadAllBytes(manifest));
+        var dtype = doc.RootElement.TryGetProperty("dtype", out var d) ? d.GetString() : null;
+        Skip.If(dtype != "q8", $"golden fixtures were generated with dtype '{dtype ?? "unknown"}', but the service uses the q8 graphs; regenerate with tools/golden/generate.mjs (default dtype q8)");
         return TestModelPaths.ModelPath!;
     }
 

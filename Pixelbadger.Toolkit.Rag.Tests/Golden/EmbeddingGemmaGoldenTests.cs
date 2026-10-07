@@ -137,7 +137,7 @@ public class EmbeddingGemmaGoldenTests
 
         var image = await GoldenFixtures.ImagePreprocessor(services).PreprocessAsync(GoldenFixtures.PathOf(file));
 
-        // Tensors fed to vision_encoder.onnx (settles patch scan order, flatten order, position-id order, resize).
+        // Tensors fed to vision_encoder_quantized.onnx (settles patch scan order, flatten order, position-id order, resize).
         var pixels = GoldenFixtures.Tensor(caseName, "pixel_values");
         pixels.Dims.Should().Equal(1, image.NumPatches, 768);
         GoldenFixtures.AssertClose(image.PixelValues, pixels.AsFloat(), TensorTolerance, $"{caseName} pixel_values");

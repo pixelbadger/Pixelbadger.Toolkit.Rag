@@ -15,15 +15,15 @@ public sealed class EmbeddingModelOptions
     /// <summary>Matryoshka output dimension. Fixed at 256 (matches the vector(256) column).</summary>
     public int Dimensions { get; set; } = DefaultDimensions;
 
-    public string TextModelFile { get; set; } = "onnx/model.onnx";
-    public string VisionModelFile { get; set; } = "onnx/vision_encoder.onnx";
-    public string AudioModelFile { get; set; } = "onnx/audio_encoder.onnx";
+    public string TextModelFile { get; set; } = "onnx/model_quantized.onnx";
+    public string VisionModelFile { get; set; } = "onnx/vision_encoder_quantized.onnx";
+    public string AudioModelFile { get; set; } = "onnx/audio_encoder_quantized.onnx";
     public string TokenizerFile { get; set; } = "tokenizer.json";
 
     /// <summary>0 = Environment.ProcessorCount.</summary>
     public int IntraOpNumThreads { get; set; }
 
-    public string ModelId => $"embeddinggemma-2@{Dimensions}";
+    public string ModelId => $"embeddinggemma-2-q8@{Dimensions}";
 
     public string Resolve(string relative) => Path.Combine(ModelPath, relative);
 }

@@ -3,7 +3,7 @@ using Microsoft.Data.SqlTypes;
 namespace Pixelbadger.Toolkit.Rag.Domain;
 
 /// <summary>
-/// One embedded unit of a document. Table: dbo.Chunks_EG2_256 (one table per model + dimension).
+/// One embedded unit of a document. Table: dbo.Chunks_EG2Q8_256 (one table per model + dimension).
 /// </summary>
 public sealed class Chunk
 {
@@ -31,7 +31,7 @@ public sealed class Chunk
     /// <summary>Raw chunk text (text chunks only). Null for image/audio.</summary>
     public string? ChunkText { get; set; }
 
-    /// <summary>Embedding model identifier, e.g. "embeddinggemma-2@256".</summary>
+    /// <summary>Embedding model identifier, e.g. "embeddinggemma-2-q8@256".</summary>
     public string EmbeddingModel { get; set; } = string.Empty;
 
     /// <summary>Truncated (256-d) and re-normalised embedding. Column type vector(256).</summary>
