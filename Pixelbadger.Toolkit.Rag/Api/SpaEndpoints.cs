@@ -20,26 +20,36 @@ public static class SpaEndpoints
     }
 
     /// <summary>
-    /// Browser navigations (GET/HEAD) to unknown, extension-less paths get index.html so client-side routes survive a
-    /// refresh. Lowest-priority endpoint: real endpoints win, and <c>/api/*</c>, <c>/mcp</c>, <c>/health</c> and
-    /// missing files stay 404. Other methods get 404 too (unknown routes are 404 whatever the verb). Call after the maps.
+    /// Browser navigations (GET/HEAD) that no endpoint matched, with an extension-less path outside <c>/api</c>,
+    /// <c>/mcp</c> and <c>/health</c>, get index.html so client-side routes survive a refresh. Implemented as
+    /// middleware that only acts when routing found no endpoint at all, so real endpoints and their own 404/405/415
+    /// answers are untouched; unknown API routes and missing files stay 404. Call after <see cref="UseSpaStaticFiles"/>.
     /// </summary>
-    public static WebApplication MapSpaFallback(this WebApplication app)
+    public static WebApplication UseSpaFallback(this WebApplication app)
     {
-        app.MapFallback(async (HttpContext context, IWebHostEnvironment env) =>
+        app.Use(async (context, next) =>
         {
             var path = context.Request.Path;
-            if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method)
-                || IsReserved(path) || Path.HasExtension(path.Value))
-                return Results.NotFound();
+            if (context.GetEndpoint() is null
+                && (HttpMethods.IsGet(context.Request.Method) || HttpMethods.IsHead(context.Request.Method))
+                && !IsReserved(path) && !Path.HasExtension(path.Value))
+            {
+                var index = context.RequestServices.GetRequiredService<IWebHostEnvironment>()
+                    .WebRootFileProvider.GetFileInfo(IndexFile);
+                if (index.Exists)
+                {
+                    context.Response.StatusCode = StatusCodes.Status200OK;
+                    context.Response.ContentType = "text/html; charset=utf-8";
+                    // No-cache so a new deployment's hashed assets are picked up on the next navigation.
+                    context.Response.Headers.CacheControl = "no-cache";
+                    context.Response.ContentLength = index.Length;
+                    if (HttpMethods.IsGet(context.Request.Method))
+                        await context.Response.SendFileAsync(index);
+                    return;
+                }
+            }
 
-            var index = env.WebRootFileProvider.GetFileInfo(IndexFile);
-            if (!index.Exists)
-                return Results.NotFound();
-
-            // No-cache so a new deployment's hashed assets are picked up on the next navigation.
-            context.Response.Headers.CacheControl = "no-cache";
-            return Results.File(index.CreateReadStream(), "text/html; charset=utf-8");
+            await next();
         });
         return app;
     }

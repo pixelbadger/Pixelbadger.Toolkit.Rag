@@ -97,7 +97,7 @@ public sealed class SpaHostingTests : IDisposable
 
         var response = await client.GetAsync("/api/query");
 
-        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        response.StatusCode.Should().Be(HttpStatusCode.MethodNotAllowed);
         (await response.Content.ReadAsStringAsync()).Should().NotContain("spa-marker");
 
         var post = await client.PostAsync("/query", null);
