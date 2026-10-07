@@ -19,6 +19,9 @@ catch (RagConfigurationException ex)
     return 1;
 }
 
+// OpenTelemetry, exported over OTLP when the Aspire AppHost (locally or in Azure) supplies an endpoint.
+builder.AddServiceDefaults();
+
 builder.Services.AddRagServices(rag).AddRagHostedServices();
 
 builder.Services.AddProblemDetails();

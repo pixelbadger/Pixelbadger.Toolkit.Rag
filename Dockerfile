@@ -5,8 +5,10 @@ WORKDIR /src
 
 # Restore first (cached until the project file or lock file changes). The lock file pins every package.
 COPY Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj Pixelbadger.Toolkit.Rag/packages.lock.json Pixelbadger.Toolkit.Rag/
+COPY Pixelbadger.Toolkit.Rag.ServiceDefaults/Pixelbadger.Toolkit.Rag.ServiceDefaults.csproj Pixelbadger.Toolkit.Rag.ServiceDefaults/packages.lock.json Pixelbadger.Toolkit.Rag.ServiceDefaults/
 RUN dotnet restore Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj --locked-mode
 
+COPY Pixelbadger.Toolkit.Rag.ServiceDefaults/ Pixelbadger.Toolkit.Rag.ServiceDefaults/
 COPY Pixelbadger.Toolkit.Rag/ Pixelbadger.Toolkit.Rag/
 RUN dotnet publish Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj \
     --configuration Release --no-restore --output /app/publish

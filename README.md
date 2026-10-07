@@ -16,6 +16,7 @@ An ASP.NET Core service for retrieval-augmented generation (RAG). Upload text, i
 
 - [Prerequisites](#prerequisites)
 - [Running the service](#running-the-service)
+- [Deploying to Azure](#deploying-to-azure)
 - [Configuration](#configuration)
 - [HTTP API](#http-api)
 - [MCP server](#mcp-server)
@@ -97,6 +98,19 @@ To build the image yourself instead: `docker build -t pixelbadger-rag .`.
 
 The image defaults `Rag__ModelPath=/models/embeddinggemma-2-onnx` and `Rag__IndexPath=/data/index`.
 
+### With .NET Aspire (local orchestration)
+
+`Pixelbadger.Toolkit.Rag.AppHost` is an [Aspire](https://aspire.dev) AppHost that runs the whole stack locally: SQL Server 2025 in a persistent container (data volume, generated `sa` password kept in the AppHost's user secrets) and the service as a .NET project (debuggable), with the Aspire dashboard for logs, traces and metrics. It needs Docker, the .NET 10 SDK, the local model (above) and `ffmpeg` on `PATH` for audio.
+
+```bash
+# Once: where your local model snapshot is
+dotnet user-secrets set Parameters:model-path ~/models/embeddinggemma-2-onnx --project Pixelbadger.Toolkit.Rag.AppHost
+
+dotnet run --project Pixelbadger.Toolkit.Rag.AppHost     # or: aspire run
+```
+
+The dashboard URL is printed at startup; the service listens on `http://localhost:8080` as before. Without the secret, the dashboard asks for `model-path`. The Lucene index is the project's `./index` (from `appsettings.Development.json`, which also forces exact vector search locally). The connection string is injected as `Rag__ConnectionString`.
+
 ### From source (.NET 10 SDK)
 
 ```bash
@@ -110,6 +124,38 @@ dotnet run --project Pixelbadger.Toolkit.Rag --urls http://localhost:8080
 The service refuses to start (with a clear message and exit code 1) when the index path, connection string or model path is missing, or the model directory does not exist. Validation never loads the model or connects to SQL.
 
 > **One instance per index.** The Lucene index directory has a single writer, and the ingest worker processes one job at a time. Run exactly one instance per index directory and database; multiple instances are not supported. The code relies on that: at startup any job still `Processing` is put back to `Queued` (it belonged to the previous process), and deletes are serialised with ingest writes by an in-process lock.
+
+## Deploying to Azure
+
+The same AppHost describes the Azure deployment. `azd up` (or `aspire deploy`) provisions:
+
+| Resource | Details |
+|---|---|
+| Azure Container Apps environment | Consumption workload profile, Log Analytics, Aspire dashboard, Azure Container Registry. |
+| Container App `rag` | The repository's `Dockerfile` image (includes ffmpeg). **4 vCPU / 8 GiB** (the Consumption profile maximum), **exactly one replica** (min 1, max 1: one instance owns the index and the queue, and the ingest worker must keep running). External HTTPS ingress on port 8080. |
+| Azure Files share mounted at `/data` | Holds the Lucene index (`/data/index`) and the model (`/data/models/embeddinggemma-2-onnx`). Mounted as the container's `app` user. |
+| Azure SQL Database `ragdb` | General Purpose serverless `GP_S_Gen5_2` (0.5–2 vCores). Entra ID only: the app connects with its user-assigned managed identity (`Authentication="Active Directory Default"`), which the deployment adds to the database as `db_owner` so migrations can run at startup. |
+
+```bash
+az login && azd auth login
+export PBRAG_MODEL_PATH=~/models/embeddinggemma-2-onnx   # lets the postprovision hook upload the model
+azd up                                                   # pick a subscription, location and environment name
+```
+
+**The model.** The service never downloads models, so the ~3 GB snapshot has to be uploaded to the file share once. `azd up` does that in its `postprovision` hook when `PBRAG_MODEL_PATH` is set (it skips the upload when the model is already there). Otherwise, or with `aspire deploy`, run it yourself after provisioning (needs the Azure CLI, signed in):
+
+```bash
+AZURE_RESOURCE_GROUP=rg-<environment> scripts/upload-model.sh ~/models/embeddinggemma-2-onnx   # --force re-uploads
+```
+
+Until the model is there the app exits at startup ("Model directory ... not found") and Container Apps keeps restarting it; it comes up on its own once the upload finishes (or restart the revision, as the script prints).
+
+Things to know:
+
+- **There is no authentication.** The ingress is public, so anyone with the URL can upload, delete and search. Restrict it before putting real data there (for example Container Apps IP restrictions or built-in authentication, or set the ingress to internal).
+- **Cost.** The app runs one 4 vCPU / 8 GiB replica around the clock. The worker polls the queue every `Rag:Ingest:PollIntervalSeconds` (2 s), so the serverless database never auto-pauses: expect to pay at least its minimum capacity continuously.
+- **Deployments briefly overlap.** Container Apps starts a new revision before it stops the old one, so for a short time two instances share the index and the queue. Avoid deploying while ingest jobs are running; a job the old instance was processing is requeued by the new one at startup.
+- **Lucene on Azure Files (SMB).** The index lives on a network share (`nobrl` mount option: Lucene's lock file uses client-side locks, which is safe with one instance). Expect slower ingest and BM25 queries than on local disk.
 
 ## Configuration
 
@@ -308,7 +354,7 @@ dotnet test
 ```
 
 - Tests use **xUnit, FluentAssertions and Moq**. SQL-backed tests (store, pipeline, ingest queue, worker) run against a SQL Server 2025 container started by **Testcontainers** (Docker required; shared via the `SqlServer` collection fixture).
-- To reuse an existing SQL Server instead of starting a container, set `PBRAG_TEST_SQL_CONNECTION_STRING` to its connection string.
+- To reuse an existing SQL Server instead of starting a container, set `PBRAG_TEST_SQL_CONNECTION_STRING` to its connection string. The tests do not use the Aspire AppHost: they start their own container, so the only local requirement is Docker, as for Aspire.
 - API and MCP tests host the real application in-process with `WebApplicationFactory<Program>` (mocked search service, queue and store, no worker, no SQL, no model).
 - Embedding-dependent tests use a deterministic mock embedding service. **Golden tests** that compare against the real ONNX model run only when `PBRAG_MODEL_PATH` points at a local model; otherwise they are skipped. Reference vectors are generated with the transformers.js scripts in [`tools/golden`](tools/golden).
 - CI (`.github/workflows`) runs on .NET 10. Pull requests build and test, build the container image without pushing it and, when they change `Pixelbadger.Toolkit.Rag/`, require `<Version>` to be higher than the latest `v*` git tag. A merge to `master` builds, tests and pushes the image to GHCR (tags `<Version>`, `latest`, `sha-<short>`), then creates the `v<Version>` tag; the push is refused if that tag already exists, so bump `<Version>` for every release. The registry login uses the built-in `GITHUB_TOKEN`.
