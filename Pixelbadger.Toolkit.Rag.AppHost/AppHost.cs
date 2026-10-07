@@ -6,7 +6,7 @@ using Azure.Provisioning.Storage;
 
 // Local run (`dotnet run --project Pixelbadger.Toolkit.Rag.AppHost` / `aspire run`):
 //   SQL Server 2025 in a persistent container, the app as a .NET project (debuggable; ffmpeg on PATH for audio),
-//   and the model from a local directory (parameter "model-path").
+//   the model from a local directory (parameter "model-path"), and the browser UI on the Vite dev server ("ui").
 // Publish (`azd up` / `aspire deploy`):
 //   Azure SQL Database (Entra ID auth through the app's managed identity) and the Dockerfile image on Azure Container
 //   Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, at most one replica), with one Azure Files share at
@@ -100,9 +100,16 @@ else
     // in the dashboard when prompted).
     var modelPath = builder.AddParameter("model-path");
 
-    builder.AddProject<Projects.Pixelbadger_Toolkit_Rag>("rag")
+    var rag = builder.AddProject<Projects.Pixelbadger_Toolkit_Rag>("rag")
         .WithEnvironment("Rag__ModelPath", modelPath)
         .WithRagDefaults(db, storage, ingestActive);
+
+    // The project has no wwwroot locally (the Dockerfile builds the SPA into it), so serve the UI from the Vite dev
+    // server, which proxies /api, /mcp and /health to the app.
+    builder.AddViteApp("ui", "../Pixelbadger.Toolkit.Rag/ClientApp")
+        .WithEnvironment("PBRAG_DEV_API", rag.GetEndpoint("http"))
+        .WithExternalHttpEndpoints()
+        .WaitFor(rag);
 }
 
 builder.Build().Run();
