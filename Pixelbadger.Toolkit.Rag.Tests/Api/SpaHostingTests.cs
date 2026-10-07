@@ -101,7 +101,7 @@ public sealed class SpaHostingTests : IDisposable
         (await response.Content.ReadAsStringAsync()).Should().NotContain("spa-marker");
 
         var post = await client.PostAsync("/query", null);
-        post.StatusCode.Should().NotBe(HttpStatusCode.OK);
+        post.StatusCode.Should().Be(HttpStatusCode.NotFound);
     }
 
     [Fact]
