@@ -15,3 +15,5 @@ Pixelbadger.Toolkit.Rag.AppHost/
 scripts/
 azure.yaml
 aspire.config.json
+**/node_modules/
+Pixelbadger.Toolkit.Rag/ClientApp/dist/
