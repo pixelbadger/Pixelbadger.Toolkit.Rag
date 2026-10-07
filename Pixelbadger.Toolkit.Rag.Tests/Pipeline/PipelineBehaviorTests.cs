@@ -8,7 +8,7 @@ using Pixelbadger.Toolkit.Rag.Persistence;
 namespace Pixelbadger.Toolkit.Rag.Tests.Pipeline;
 
 /// <summary>
-/// End-to-end ingest + hybrid search behaviour against the <see cref="IDocumentStore"/> contract.
+/// End-to-end ingest + vector search behaviour against the <see cref="IDocumentStore"/> contract.
 /// Subclasses choose the store: in-memory (unit) or real SQL Server (integration).
 /// </summary>
 public abstract class PipelineBehaviorTests : IDisposable
@@ -20,10 +20,10 @@ public abstract class PipelineBehaviorTests : IDisposable
 
     protected abstract Task<StoreUnderTest> CreateStoreAsync();
 
-    protected async Task<PipelineHarness> NewHarnessAsync(Func<ILuceneRepository, ILuceneRepository>? decorateLucene = null)
+    protected async Task<PipelineHarness> NewHarnessAsync()
     {
         var (store, createDocument) = await CreateStoreAsync();
-        var harness = new PipelineHarness(store, decorateLucene?.Invoke(new LuceneRepository()), createDocument);
+        var harness = new PipelineHarness(store, createDocument);
         _harnesses.Add(harness);
         return harness;
     }
@@ -63,7 +63,7 @@ public abstract class PipelineBehaviorTests : IDisposable
     }
 
     [SkippableFact]
-    public async Task Reingest_ReplacesPreviousContent_InSqlAndLucene()
+    public async Task Reingest_ReplacesPreviousContent()
     {
         using var h = await NewHarnessAsync();
         var path = h.Write("doc.txt", "zebra stripes\n\nzebra herd");
@@ -96,7 +96,7 @@ public abstract class PipelineBehaviorTests : IDisposable
     }
 
     [SkippableFact]
-    public async Task IngestFile_Image_IsOneVectorOnlyChunk_AndCreatesNoLuceneIndex()
+    public async Task IngestFile_Image_IsOneChunkWithoutText()
     {
         using var h = await NewHarnessAsync();
         var path = h.WriteBytes("photo.png", [1, 2, 3, 4, 5]);
@@ -105,16 +105,13 @@ public abstract class PipelineBehaviorTests : IDisposable
 
         result.Modality.Should().Be(Modality.Image);
         result.ChunkCount.Should().Be(1);
-        Directory.Exists(h.IndexPath).Should().BeFalse("image chunks are not indexed in Lucene");
 
-        // A media-only corpus is still searchable (vector side only).
+        // A media-only corpus is searchable.
         var hits = await h.Search.SearchAsync("a photo", 5);
         var hit = hits.Single();
         hit.Modality.Should().Be(Modality.Image);
         hit.Content.Should().BeNull();
         hit.LocatorStart.Should().BeNull();
-        hit.KeywordRank.Should().BeNull();
-        hit.VectorRank.Should().Be(1);
     }
 
     [SkippableFact]
@@ -216,13 +213,12 @@ public abstract class PipelineBehaviorTests : IDisposable
 
         await act.Should().ThrowAsync<DocumentNotFoundException>().Where(e => e.DocumentId == unknown);
         (await h.Search.SearchAsync("ghost", 5)).Should().BeEmpty();
-        Directory.Exists(h.IndexPath).Should().BeFalse("nothing reached Lucene");
     }
 
     // ---- delete ----
 
     [SkippableFact]
-    public async Task DeleteDocument_RemovesItsChunksFromSqlAndLucene_AndLeavesOthers()
+    public async Task DeleteDocument_RemovesItsChunks_AndLeavesOthers()
     {
         using var h = await NewHarnessAsync();
         h.Write("keep.txt", "shared phrase keep");
@@ -236,30 +232,7 @@ public abstract class PipelineBehaviorTests : IDisposable
         outcome.Should().Be(DeleteOutcome.Deleted);
         var left = await h.Search.SearchAsync("shared phrase", 10);
         left.Should().ContainSingle().Which.SourcePath.Should().Be("keep.txt");
-        (await h.Lucene.SearchAsync(h.IndexPath, "drop", 10, null)).Should().BeEmpty();
         (await h.NewDocumentService().DeleteAsync(drop.DocumentId)).Should().Be(DeleteOutcome.NotFound);
-    }
-
-    [SkippableFact]
-    public async Task DeleteDocument_LandingBetweenTheSqlAndLuceneWrites_LeavesNothingBehind()
-    {
-        PausingLuceneRepository? pausing = null;
-        using var h = await NewHarnessAsync(inner => pausing = new PausingLuceneRepository(inner));
-        var path = h.Write("race.txt", "racing words");
-        var documentId = await h.NewDocumentAsync("race.txt");
-
-        var ingest = h.Ingester.IngestAsync(new IngestSource(path, "race.txt", documentId));
-        await pausing!.Entered.WaitAsync(TimeSpan.FromSeconds(10)); // SQL written, Lucene not yet
-        var delete = h.NewDocumentService().DeleteAsync(documentId);
-        await Task.Delay(200);
-
-        delete.IsCompleted.Should().BeFalse("the delete waits for the ingest's SQL + Lucene writes");
-        pausing.Release();
-        await ingest;
-        (await delete).Should().Be(DeleteOutcome.Deleted);
-
-        (await h.Search.SearchAsync("racing", 5)).Should().BeEmpty();
-        (await h.Lucene.SearchAsync(h.IndexPath, "racing", 5, null)).Should().BeEmpty("the delete also removed the Lucene entries");
     }
 
     // ---- ingestion safety ----
@@ -323,24 +296,24 @@ public abstract class PipelineBehaviorTests : IDisposable
     // ---- search ----
 
     [SkippableFact]
-    public async Task Search_HybridRanking_PutsChunkMatchingBothSidesFirst()
+    public async Task Search_RanksNearestChunkFirst_WithCosineSimilarityScores()
     {
         using var h = await NewHarnessAsync();
         h.Write("corpus.txt", "alpha beta gamma\n\ndelta epsilon zeta\n\neta theta iota\n\nkappa lambda mu");
         await h.IngestAsync(Path.Combine(h.ContentDir, "corpus.txt"));
 
-        // The mock embeds identical text identically, so the chunk is also the nearest vector.
+        // The mock embeds identical text identically, so the chunk is also the nearest vector (cosine similarity 1).
         var results = await h.Search.SearchAsync("alpha beta gamma", 4);
 
+        results.Should().HaveCount(4);
         results[0].Content.Should().Be("alpha beta gamma");
-        results[0].KeywordRank.Should().Be(1);
-        results[0].VectorRank.Should().Be(1);
-        results[0].Score.Should().BeApproximately(2f / 61, 1e-6f);
+        results[0].Score.Should().BeApproximately(1f, 1e-4f);
+        results.Select(r => r.Score).Should().BeInDescendingOrder();
         results.Skip(1).Should().OnlyContain(r => r.Score < results[0].Score);
     }
 
     [SkippableFact]
-    public async Task Search_ReturnsVectorHits_WhenNoKeywordMatches()
+    public async Task Search_ReturnsNearestChunks_EvenWhenNoWordsMatch()
     {
         using var h = await NewHarnessAsync();
         h.Write("a.txt", "completely different words");
@@ -349,8 +322,6 @@ public abstract class PipelineBehaviorTests : IDisposable
         var results = await h.Search.SearchAsync("zzzqqq", 5);
 
         results.Should().ContainSingle();
-        results[0].KeywordRank.Should().BeNull();
-        results[0].VectorRank.Should().Be(1);
     }
 
     [SkippableFact]
@@ -364,7 +335,7 @@ public abstract class PipelineBehaviorTests : IDisposable
     }
 
     [SkippableFact]
-    public async Task Search_FiltersByDocumentIds_OnBothSides()
+    public async Task Search_FiltersByDocumentIds()
     {
         using var h = await NewHarnessAsync();
         h.Write("first.txt", "shared phrase one");
@@ -376,8 +347,6 @@ public abstract class PipelineBehaviorTests : IDisposable
 
         filtered.Should().ContainSingle();
         filtered[0].DocumentId.Should().Be(second.DocumentId);
-        filtered[0].KeywordRank.Should().NotBeNull();
-        filtered[0].VectorRank.Should().NotBeNull();
         (await h.Search.SearchAsync("shared phrase", 10)).Should().HaveCount(2);
         (await h.Search.SearchAsync("shared phrase", 10, [Guid.NewGuid()])).Should().BeEmpty();
         (await h.Search.SearchAsync("shared phrase", 10, results.Select(r => r.DocumentId).ToList())).Should().HaveCount(2);
@@ -389,18 +358,6 @@ public abstract class PipelineBehaviorTests : IDisposable
         using var h = await NewHarnessAsync();
 
         (await h.Search.SearchAsync("anything", 5)).Should().BeEmpty();
-    }
-
-    [SkippableFact]
-    public async Task Search_TreatsLuceneSyntaxAsLiteralText()
-    {
-        using var h = await NewHarnessAsync();
-        h.Write("a.txt", "some text");
-        await h.IngestAsync(Path.Combine(h.ContentDir, "a.txt"));
-
-        var act = async () => await h.Search.SearchAsync("field:\"unclosed AND (", 5);
-
-        await act.Should().NotThrowAsync();
     }
 
     [SkippableTheory]
@@ -473,46 +430,5 @@ public class InMemoryPipelineTests : PipelineBehaviorTests
         await h.IngestAsync(h.Write("a.txt", "x"));
 
         store.EnsureVectorIndexCalls.Should().Be(0);
-    }
-
-    [Fact]
-    public async Task IngestFile_MarksDocumentFailed_WhenLuceneWriteFails()
-    {
-        var store = new InMemoryDocumentStore();
-        using var h = new PipelineHarness(store, new FailingLuceneRepository());
-        var path = h.Write("a.txt", "content");
-
-        var act = async () => await h.IngestAsync(path);
-
-        await act.Should().ThrowAsync<IOException>();
-        store.StatusOf(store.AllDocumentIds.Single()).Should().Be(IndexStatus.Failed);
-    }
-
-    [Fact]
-    public async Task IngestFile_DoesNotCallLuceneForMediaFiles()
-    {
-        // A failing Lucene repository must not affect vector-only media ingestion.
-        var store = new InMemoryDocumentStore();
-        using var h = new PipelineHarness(store, new FailingLuceneRepository());
-
-        var result = await h.IngestAsync(h.WriteBytes("p.png", [1, 2, 3]));
-
-        result.ChunkCount.Should().Be(1);
-        store.StatusOf(result.DocumentId).Should().Be(IndexStatus.Indexed);
-    }
-
-    [Fact]
-    public async Task Search_SkipsStaleLuceneEntriesMissingFromStore()
-    {
-        var store = new InMemoryDocumentStore();
-        using var h = new PipelineHarness(store);
-        var path = h.Write("a.txt", "orphan words");
-        await h.IngestAsync(path);
-
-        // Re-ingest into a fresh store while keeping the old Lucene index: ids no longer resolve.
-        using var h2 = new PipelineHarness(new InMemoryDocumentStore());
-        Directory.Move(h.IndexPath, h2.IndexPath);
-
-        (await h2.Search.SearchAsync("orphan", 5)).Should().BeEmpty();
     }
 }

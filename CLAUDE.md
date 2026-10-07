@@ -2,14 +2,14 @@
 
 ## Project Overview
 
-A .NET 10 ASP.NET Core app (minimal APIs, v3.x, shipped as a container) for Retrieval-Augmented Generation (RAG): **hybrid-only** search (Lucene.NET BM25 + SQL Server vector, fused with RRF) over text, image and audio documents, embedded locally with EmbeddingGemma 2 (ONNX Runtime). Documents are created by multipart upload (`POST /api/documents`), which enqueues a background job per file in a persistent SQL queue; re-ingest and delete are REST too; query is a REST endpoint; MCP (Streamable HTTP at `/mcp`, `Search` tool only) is for AI assistants like Claude. There is no CLI, no stdio transport and no dotnet-tool packaging.
+A .NET 10 ASP.NET Core app (minimal APIs, v4.x, shipped as a container) for Retrieval-Augmented Generation (RAG): **vector-only** search (SQL Server cosine similarity) over text, image and audio documents, embedded locally with EmbeddingGemma 2 (ONNX Runtime). Documents are created by multipart upload (`POST /api/documents`), which enqueues a background job per file in a persistent SQL queue; re-ingest and delete are REST too; query is a REST endpoint; MCP (Streamable HTTP at `/mcp`, `Search` tool only) is for AI assistants like Claude. There is no CLI, no stdio transport and no dotnet-tool packaging.
 
 ### Architectural Boundary
 
 **This is an MCP server.** We provide search capabilities; the LLM is the client.
 
 **Our responsibilities:**
-- Index documents (chunks, embeddings, BM25)
+- Index documents (chunks, embeddings)
 - Execute search queries efficiently
 - Return ranked results
 
@@ -24,12 +24,12 @@ A .NET 10 ASP.NET Core app (minimal APIs, v3.x, shipped as a container) for Retr
 ### Key decisions
 
 - Embeddings: local `onnx-community/embeddinggemma-2-ONNX`, fp32, 256-d Matryoshka (truncate + re-normalise). **The service never downloads models**; `Rag:ModelPath` / `PBRAG_MODEL_PATH` points at a local copy. No OpenAI.
-- Persistence: SQL Server 2025 / Azure SQL (EF Core 10, `vector(256)`). Lucene is only the BM25 index; everything shown to users is hydrated from SQL.
-- Search: hybrid only. There is no `bm25` / `vector` mode, no search-mode option, no MCP `searchMode`.
+- Persistence: SQL Server 2025 / Azure SQL (EF Core 10, `vector(256)`). SQL is the only index; everything shown to users is hydrated from SQL.
+- Search: vector only (cosine similarity over SQL). There is no BM25 / keyword / hybrid mode, no reranker, no search-mode option, no MCP `searchMode`. BM25 and RRF were removed in 4.0 because image/audio chunks could only score from one list and were under-ranked.
 - Documents: **upload only** (`POST /api/documents`, batch allowed); the server never reads caller-named paths from its own disk. A document's id is a server-assigned `Guid` (v7) created with the upload; the *logical path* (the multipart filename) is metadata only and may repeat. One job = one file for one document; jobs live in SQL and are processed by a hosted worker.
-- **Single-instance assumption.** One instance owns a Lucene index directory (multi-instance is unsupported), and the code leans on it in three marked places: startup resets `Processing` jobs to `Queued` (`ResetInFlightJobsAsync`), `IngestJobRegistry` cancels in-process jobs on document delete, and `IndexWriteGate` serialises SQL+Lucene writes with deletes. If the app is ever scaled out, revisit all three (and rely on lease expiry instead of the reset).
+- **Single-instance assumption.** One instance runs the ingest worker (multi-instance is unsupported), and the code leans on it in two marked places: startup resets `Processing` jobs to `Queued` (`ResetInFlightJobsAsync`), and `IngestJobRegistry` cancels in-process jobs on document delete. If the app is ever scaled out, revisit both (and rely on lease expiry instead of the reset).
 - Auth is out of scope.
-- Orchestration: .NET Aspire 13.6. `Pixelbadger.Toolkit.Rag.AppHost` runs SQL Server 2025 (container) + the app (project) locally, and publishes to Azure (`azd up` / `aspire deploy`): Azure SQL Database (free offer, bill overage; Entra ID via the app's managed identity) + the Dockerfile image on Azure Container Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, max 1 replica) with one Azure Files share at `/data` (index + model) and the `ingest-active` storage queue (ingest keep-alive). The app references `Pixelbadger.Toolkit.Rag.ServiceDefaults` (OpenTelemetry only).
+- Orchestration: .NET Aspire 13.6. `Pixelbadger.Toolkit.Rag.AppHost` runs SQL Server 2025 (container) + the app (project) locally, and publishes to Azure (`azd up` / `aspire deploy`): Azure SQL Database (free offer, bill overage; Entra ID via the app's managed identity) + the Dockerfile image on Azure Container Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, max 1 replica) with one Azure Files share at `/data` (model) and the `ingest-active` storage queue (ingest keep-alive). The app references `Pixelbadger.Toolkit.Rag.ServiceDefaults` (OpenTelemetry only).
 - Multimodal: each image / audio file is its own document. Video and images inside documents are out of scope.
 
 ## Quick Reference
@@ -42,7 +42,6 @@ dotnet test
 # Config: Rag section (appsettings / Rag__* env vars / --Rag:Key=value), PBRAG_* env vars as fallbacks
 export PBRAG_CONNECTION_STRING='Server=localhost,1433;User Id=sa;Password=...;TrustServerCertificate=True;Encrypt=False'
 export PBRAG_MODEL_PATH=~/models/embeddinggemma-2-onnx
-export PBRAG_INDEX_PATH=./index
 
 # Run (http://localhost:8080 with the launch profile)
 dotnet run --project Pixelbadger.Toolkit.Rag
@@ -75,7 +74,7 @@ docker build -t pixelbadger-rag .
 ```
 Pixelbadger.Toolkit.Rag/
 ├── Program.cs                   # Small: bind config -> AddRagServices -> MCP -> map endpoints; `public partial class Program`
-├── RagOptions.cs                # App config (IndexPath, Sql, Model, Ingest, ApplyMigrationsOnStartup)
+├── RagOptions.cs                # App config (Sql, Model, Ingest, ApplyMigrationsOnStartup)
 ├── appsettings*.json            # `Rag` section defaults (no secrets)
 ├── Configuration/
 │   └── RagConfiguration.cs     # Binds/validates the `Rag` section (+ PBRAG_* fallbacks); RagConfigurationException
@@ -87,7 +86,7 @@ Pixelbadger.Toolkit.Rag/
 │   ├── IIngestQueue.cs, SqlIngestQueue.cs # Persistent SQL queue of documents + jobs (claim with UPDLOCK/READPAST, leases, attempts, re-ingest rules) + DTOs
 │   ├── IngestWorker.cs         # BackgroundService: claim job -> ingest its file -> complete/fail; quiet stop on cancel / deleted document
 │   ├── IngestJobRegistry.cs    # The job being processed (cancel on document delete, await its end)
-│   ├── DocumentService.cs      # Delete orchestration: cancel job, await worker, delete SQL + Lucene
+│   ├── DocumentService.cs      # Delete orchestration: cancel job, await worker, delete SQL rows
 │   ├── InFlightJobRecovery.cs  # Startup reset of Processing jobs (hosted service + once-guard the worker also calls)
 │   ├── DatabaseMigrationHostedService.cs # Runs migrations first (registered first), then InFlightJobRecoveryHostedService, then the worker
 │   ├── IngestRequestValidator.cs # Upload validation incl. safe logical paths
@@ -98,11 +97,8 @@ Pixelbadger.Toolkit.Rag/
 │   ├── McpRagServer.cs         # MCP tool class (DI-resolved per call): Search
 │   └── SearchResultFormatter.cs# MCP text rendering (locators, [image]/[audio] markers)
 ├── Components/                  # Core pipeline
-│   ├── ContentIngester.cs      # IngestAsync(IngestSource): routes by modality, embeds, stores in SQL + Lucene
-│   ├── SearchService.cs        # BM25 + vector in parallel, RRF, hydrate from SQL
-│   ├── LuceneRepository.cs     # BM25 index (chunk_id, document_id, content)
-│   ├── IndexWriteGate.cs       # Serialises SQL+Lucene writes with deletes (single-process)
-│   ├── RrfReranker.cs          # RRF fusion (k = 60)
+│   ├── ContentIngester.cs      # IngestAsync(IngestSource): routes by modality, embeds, stores in SQL
+│   ├── SearchService.cs        # Embed query -> SQL vector search -> hydrate from SQL (score = cosine similarity)
 │   ├── ChunkerFactory.cs, FileReaders/  # Extension-based text chunking / reading
 │   └── DependencyInjection.cs  # AddRagServices(RagOptions), AddRagHostedServices()
 ├── Domain/                      # Document, Chunk, IngestJob, Modality, IndexStatus, LogicalPath, MediaTypes
@@ -114,7 +110,7 @@ Pixelbadger.Toolkit.Rag.ServiceDefaults/ # Aspire service defaults, trimmed to O
 Pixelbadger.Toolkit.Rag.AppHost/ # Aspire AppHost: local orchestration + Azure (ACA + Azure SQL) publish
 azure.yaml, aspire.config.json   # azd project (postprovision hook -> scripts/upload-model.sh); Aspire CLI AppHost pointer
 scripts/upload-model.sh          # Uploads the local model to the ACA file share (/data/models/embeddinggemma-2-onnx)
-Dockerfile, .dockerignore        # Multi-stage image (aspnet:10.0 + ffmpeg); model and index are mounted
+Dockerfile, .dockerignore        # Multi-stage image (aspnet:10.0 + ffmpeg); the model is mounted
 tools/golden/                    # transformers.js scripts that generate golden fixtures from the real model
 ```
 
@@ -124,12 +120,10 @@ tools/golden/                    # transformers.js scripts that generate golden 
 |-----------|---------|-----------------|
 | `IContentIngester` | Ingests one `IngestSource(LocalPath, LogicalPath, DocumentId)` into an existing document | `ContentIngester` |
 | `IIngestQueue` | Persistent document/job queue (create documents, re-ingest, claim, lease, complete, startup reset) | `SqlIngestQueue` |
-| `ISearchService` | Hybrid search orchestration | `SearchService` |
+| `ISearchService` | Vector search orchestration | `SearchService` |
 | `IDocumentStore` | SQL persistence + vector search + migrations | `SqlDocumentStore` |
-| `ILuceneRepository` | BM25 index operations | `LuceneRepository` |
 | `ITextChunker` | Text chunking | `ParagraphTextChunker`, `MarkdownTextChunker` |
 | `IFileReader` | Text file reading | `PlainTextFileReader`, `MarkdownFileReader` |
-| `IReranker` | Result fusion | `RrfReranker` |
 | `IEmbeddingService` | Query / text / image / audio embeddings | `GemmaEmbeddingService` |
 | `IImagePreprocessor` / `IVisionEncoder` | Image -> features | `ImagePreprocessor` / `VisionEncoder` |
 | `IAudioPreprocessor` / `IAudioEncoder` | Audio (ffmpeg, log-mel) -> features | `AudioPreprocessor` / `AudioEncoder` |
@@ -137,7 +131,7 @@ tools/golden/                    # transformers.js scripts that generate golden 
 ### Domain model
 
 - `Document`: int PK + unique `GlobalId` **Guid** (`Guid.CreateVersion7()`, assigned when the document is created at upload time; the id callers see and filter by). The row exists from POST time (status `Queued`, empty `ContentHash`) so the id can be returned; `SourcePath` / `Title` / `Modality` come from the latest upload. Uploading the same path twice makes two documents. `IndexStatus` (`Queued/Processing/Indexed/Failed`) follows the latest job.
-- `Chunk` (table `dbo.Chunks_EG2_256`): int clustered PK (stored in Lucene as `chunk_id`), unique `GlobalId` Guid (shown to users as chunk id), `DocumentId` FK (cascade delete), ordinal, modality, locator range (chars for text, ms for audio, none for images), text (text chunks only), `vector(256)` embedding.
+- `Chunk` (table `dbo.Chunks_EG2_256`): int clustered PK, unique `GlobalId` Guid (shown to users as chunk id), `DocumentId` FK (cascade delete), ordinal, modality, locator range (chars for text, ms for audio, none for images), text (text chunks only), `vector(256)` embedding.
 - `IngestJob` (`dbo.IngestJobs`, one row per job, FK to the document with cascade delete): status (`Queued/Processing/Succeeded/Skipped/Failed`), attempts, lease owner/expiry, logical path, `varbinary(max)` content that is NULLed once the job is terminal, chunk count, error. Job history is kept; the document view shows the latest job. A document has at most one non-terminal job.
 
 ### Data Flow
@@ -149,20 +143,20 @@ POST /api/documents/{id} -> EnqueueReingestAsync -> Created | ReplacedQueued (qu
 Startup: DatabaseMigrationHostedService -> InFlightJobRecoveryHostedService (Processing -> Queued; the worker repeats it before its first claim if SQL was down) -> IngestWorker
 IngestWorker: TryClaimNextAsync (lease, attempts++, document -> Processing) -> registry.Begin -> bytes -> temp file (original extension)
      -> IContentIngester.IngestAsync(IngestSource(temp, logical, documentId)): MediaTypes (extension) -> text: reader -> chunker | image: preprocess+encode | audio: ffmpeg windows+encode
-     -> IEmbeddingService -> [IndexWriteGate] IDocumentStore.ReplaceDocumentAsync (existing document only, one transaction) + LuceneRepository.ReplaceDocumentAsync (text chunks)
+     -> IEmbeddingService -> IDocumentStore.ReplaceDocumentAsync (existing document only, one transaction)
      -> CompleteAsync (result recorded, bytes NULLed, document status follows) -> when the queue is idle: EnsureVectorIndexAsync (>= 100 rows)
 ```
 
 **Delete:**
 ```
 DELETE /api/documents/{id} -> DocumentService: registry.CancelDocument (await the worker, Rag:Ingest:CancelTimeoutSeconds, else 409)
-     -> [IndexWriteGate] IDocumentStore.DeleteDocumentAsync (jobs, then document; chunks cascade) + LuceneRepository.DeleteDocumentAsync -> 204 | 404
+     -> IDocumentStore.DeleteDocumentAsync (jobs, then document; chunks cascade) -> 204 | 404
 ```
 The worker treats a cancelled job (registry) and `DocumentNotFoundException` (document deleted between claim and write) as quiet stops: no requeue, no failure.
 
 **Search:**
 ```
-Query -> SearchService -> [Lucene BM25 || SQL vector] (max(2n, 20) each) -> RRF -> hydrate via IDocumentStore -> SearchResults
+Query -> SearchService -> embed -> IDocumentStore.SearchAsync (n nearest, cosine) -> hydrate via IDocumentStore -> SearchResults (Score = 1 - distance)
 ```
 
 ## Code Conventions
@@ -214,12 +208,12 @@ All I/O is async: repositories return `Task<T>`, pass `CancellationToken`, avoid
 ```
 Pixelbadger.Toolkit.Rag.Tests/
 ├── Support/               # MockEmbeddingService (deterministic 256-d), SqlServerFixture, RagWebApplicationFactory, TestModelPaths
-├── Api/                   # Query/document endpoint tests (WebApplicationFactory, mocked ISearchService / IIngestQueue / IDocumentStore / ILuceneRepository, no worker)
+├── Api/                   # Query/document endpoint tests (WebApplicationFactory, mocked ISearchService / IIngestQueue / IDocumentStore, no worker)
 ├── Host/                  # RagConfiguration binding, DI graph / laziness of the real web host
 ├── Mcp/                   # SearchResultFormatter + tool tests, MCP client over /mcp (Streamable HTTP, in-process)
 ├── Ingestion/             # Validator, signal, worker behaviour (in-memory + SQL queue; cancel, deleted document, startup reset), SqlIngestQueue tests
 ├── Persistence/           # SQL store integration tests (SqlServerFixture)
-├── Pipeline/              # Ingester / search / Lucene / RRF tests
+├── Pipeline/              # Ingester / search tests
 ├── Embeddings/            # Text, Vision, Audio unit tests
 ├── Golden/                # Real-model golden tests (skipped unless PBRAG_MODEL_PATH is set)
 └── test-assets/golden/    # Fixtures generated by tools/golden
@@ -249,7 +243,7 @@ Ingester tests go through `PipelineHarness.IngestAsync(path)` (logical path = pa
 
 ## Aspire / Azure
 
-- `AppHost.cs` branches on `builder.ExecutionContext.IsPublishMode`: run mode uses `AddProject` (debuggable, local `./index`, model from the `model-path` parameter); publish mode uses `AddDockerfile` (the root `Dockerfile`, so ffmpeg is there) with a `/data` volume and `Rag__ModelPath=/data/models/embeddinggemma-2-onnx`. Shared wiring (`WithReference(db)`, `Rag__ConnectionString`, `WaitFor`, health check) is in `WithRagDefaults`.
+- `AppHost.cs` branches on `builder.ExecutionContext.IsPublishMode`: run mode uses `AddProject` (debuggable, model from the `model-path` parameter); publish mode uses `AddDockerfile` (the root `Dockerfile`, so ffmpeg is there) with a `/data` volume and `Rag__ModelPath=/data/models/embeddinggemma-2-onnx`. Shared wiring (`WithReference(db)`, `Rag__ConnectionString`, `WaitFor`, health check) is in `WithRagDefaults`.
 - The database resource is `ragdb` (a resource cannot share the app's name `rag`). `WithReference(db)` is what grants the app identity `db_owner` in Azure; keep it.
 - Keep **one** volume on the container: with two, Aspire 13.6 gives both environment storages the same truncated name. The volume's mount options set uid/gid 1654 (the image's `app` user) and `nobrl`.
 - Azure SQL uses `Authentication="Active Directory Default"`; SqlClient 7 needs `Microsoft.Data.SqlClient.Extensions.Azure` for that (`Tests/Host/SqlAuthenticationTests` guards it).
@@ -291,13 +285,13 @@ Edit `Pixelbadger.Toolkit.Rag/Pixelbadger.Toolkit.Rag.csproj` (`<Version>X.Y.Z</
 
 ## Search
 
-Hybrid only. Algorithm (RRF):
-1. Fetch `max(2n, 20)` candidates from BM25 (Lucene) and vector search (SQL) in parallel
-2. Score each chunk `1 / (60 + rank)` per list
-3. Sum scores for chunks appearing in both
-4. Return the top N by fused score, hydrated from SQL (`SearchResult` carries `KeywordRank` / `VectorRank`)
+Vector only. Algorithm:
+1. Embed the query (EmbeddingGemma 2, 256-d)
+2. Fetch exactly `maxResults` nearest chunks from SQL (`IDocumentStore.SearchAsync`), optionally filtered by `documentIds`
+3. Hydrate the chunks from SQL and return them in vector-hit order; hits whose chunk vanished meanwhile (document deleted) are skipped
+4. `SearchResult.Score` is the cosine similarity, `1 - cosine distance`; higher is more similar. Text, image and audio chunks compete on the same metric.
 
-Vector search is approximate (`VECTOR_SEARCH`, DiskANN) when the index exists and `VectorSearchMode.Auto` allows it, otherwise exact `VECTOR_DISTANCE` (`Rag:ExactVectorSearch` forces exact). Only text chunks are in Lucene; image/audio chunks are found by the vector side.
+Vector search is approximate (`VECTOR_SEARCH`, DiskANN) when the index exists and `VectorSearchMode.Auto` allows it, otherwise exact `VECTOR_DISTANCE` (`Rag:ExactVectorSearch` forces exact).
 
 ## Configuration
 
@@ -305,7 +299,6 @@ Bound from the `Rag` section (appsettings, env `Rag__*`, command line) by `RagCo
 
 | Key | Fallback env var | Notes |
 |---|---|---|
-| `Rag:IndexPath` | `PBRAG_INDEX_PATH` | Required. Created if missing. One instance per directory. |
 | `Rag:ConnectionString` | `PBRAG_CONNECTION_STRING` | Required. SQL Server 2025 / Azure SQL. |
 | `Rag:ModelPath` | `PBRAG_MODEL_PATH` | Required. Local `onnx-community/embeddinggemma-2-ONNX` snapshot; must exist. |
 | `Rag:ExactVectorSearch` | | Default false. |
@@ -315,9 +308,8 @@ Bound from the `Rag` section (appsettings, env `Rag__*`, command line) by `RagCo
 
 Prerequisites outside the repo: SQL Server 2025 (e.g. `docker run -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e 'MSSQL_SA_PASSWORD=...' -p 1433:1433 mcr.microsoft.com/mssql/server:2025-latest`; the DiskANN index is a preview feature on SQL Server 2025 and needs `PREVIEW_FEATURES = ON`), the model files (`huggingface-cli download onnx-community/embeddinggemma-2-ONNX` with `tokenizer.json`, `config.json`, `processor_config.json` and fp32 `onnx/model`, `onnx/vision_encoder`, `onnx/audio_encoder`; each `.onnx_data` must sit beside its `.onnx`), and `ffmpeg` on PATH for audio (included in the container image).
 
-## Index Storage
+## Storage
 
-- **Lucene index:** `{index-path}/` (BM25 only: `chunk_id`, `document_id` (the Guid in `"D"` form), indexed-but-not-stored `content`)
 - **SQL:** `dbo.Documents`, `dbo.Chunks_EG2_256` (text, metadata, `vector(256)`), `dbo.IngestJobs` (queue and job history); schema managed by EF Core migrations applied at startup (`Rag:ApplyMigrationsOnStartup`)
 
 ## MCP Server Integration
@@ -339,7 +331,6 @@ Prerequisites outside the repo: SQL Server 2025 (e.g. `docker run -e ACCEPT_EULA
 
 | Package | Purpose |
 |---------|---------|
-| Lucene.Net 4.8.0-beta | BM25 search |
 | Microsoft.EntityFrameworkCore.SqlServer 10 / Microsoft.Data.SqlClient | SQL persistence, `vector` type, ingest queue |
 | Microsoft.ML.OnnxRuntime | Local embedding inference |
 | SkiaSharp | Image decoding |
@@ -369,7 +360,7 @@ The chunk table name (`Chunks_EG2_256`) and `EmbeddingModelOptions.ModelId` enco
 
 ## Troubleshooting
 
-**Startup exits with "Configuration error: Missing ..."**: set `Rag:IndexPath` / `Rag:ConnectionString` / `Rag:ModelPath` (or `PBRAG_INDEX_PATH` / `PBRAG_CONNECTION_STRING` / `PBRAG_MODEL_PATH`); the model directory must exist.
+**Startup exits with "Configuration error: Missing ..."**: set `Rag:ConnectionString` / `Rag:ModelPath` (or `PBRAG_CONNECTION_STRING` / `PBRAG_MODEL_PATH`); the model directory must exist.
 
 **Ingest job stays `Queued`**: the worker polls the queue; check the log for SQL errors ("Ingest worker could not process the queue; retrying in ...") and that migrations ran (`Rag:ApplyMigrationsOnStartup`).
 
@@ -377,9 +368,11 @@ The chunk table name (`Chunks_EG2_256`) and `EmbeddingModelOptions.ModelId` enco
 
 **Re-ingest or delete answers `409`**: the document's job is running (re-ingest: wait and upload again) or did not stop within `Rag:Ingest:CancelTimeoutSeconds` (delete: retry).
 
-**Upgrading from 2.x**: the 3.0 migration drops and recreates the document, chunk and job tables; use a fresh Lucene index directory and re-upload.
+**Upgrading from 2.x**: the 3.0 migration drops and recreates the document, chunk and job tables; re-upload.
 
-**Empty search results**: check that content was chunked (non-empty paragraphs), that the ingest job completed, and that the Lucene index and SQL database belong together.
+**Upgrading from 3.x**: 4.0 removed BM25/hybrid search and `Rag:IndexPath` / `PBRAG_INDEX_PATH` (ignored if still set; the old index directory can be deleted). No migration, no re-upload.
+
+**Empty search results**: check that content was chunked (non-empty paragraphs), that the ingest job completed, and that the query is run against the right database (and `documentIds`, if given, exist).
 
 **Audio ingestion fails**: install `ffmpeg` and put it on `PATH` (the container image includes it).
 

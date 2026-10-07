@@ -5,7 +5,7 @@ using Pixelbadger.Toolkit.Rag.Tests.Support;
 namespace Pixelbadger.Toolkit.Rag.Tests.Pipeline;
 
 /// <summary>
-/// The full behaviour suite against the real <see cref="SqlDocumentStore"/> and a real Lucene directory.
+/// The full behaviour suite against the real <see cref="SqlDocumentStore"/> (with the mock embedding service).
 /// Skipped while the store is still a stub (MigrateAsync throws NotImplementedException).
 /// </summary>
 [Collection("SqlServer")]

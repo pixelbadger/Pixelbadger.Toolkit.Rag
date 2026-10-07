@@ -33,7 +33,6 @@ public static class DependencyInjection
 
         // Persistence
         services.AddTransient<IDocumentStore, SqlDocumentStore>();
-        services.AddTransient<ILuceneRepository, LuceneRepository>();
 
         // Ingest queue (SQL) + request validation
         services.AddTransient<IIngestQueue, SqlIngestQueue>();
@@ -45,9 +44,6 @@ public static class DependencyInjection
         services.TryAddSingleton<IIngestKeepAlive, NoIngestKeepAlive>();
         services.AddTransient<DocumentService>();
 
-        // Serialises SQL + Lucene writes (ingest) against document deletes; single-process assumption, see the class.
-        services.AddSingleton<IndexWriteGate>();
-
         // Chunking / reading
         services.AddTransient<ITextChunker, MarkdownTextChunker>();
         services.AddTransient<ITextChunker, ParagraphTextChunker>();
@@ -57,7 +53,6 @@ public static class DependencyInjection
         services.AddTransient<FileReaderFactory>();
 
         // Pipeline
-        services.AddTransient<IReranker, RrfReranker>();
         services.AddTransient<IContentIngester, ContentIngester>();
         services.AddTransient<ISearchService, SearchService>();
 

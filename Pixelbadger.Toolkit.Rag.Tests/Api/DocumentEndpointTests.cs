@@ -434,7 +434,7 @@ public class DocumentEndpointTests
     // ---- DELETE /api/documents/{id} ----
 
     [Fact]
-    public async Task Delete_ExistingDocument_Returns204_AndRemovesSqlAndLuceneData()
+    public async Task Delete_ExistingDocument_Returns204_AndDeletesTheDocument()
     {
         using var factory = NewFactory();
         factory.Store.Setup(s => s.DeleteDocumentAsync(DocA, It.IsAny<CancellationToken>())).ReturnsAsync(true);
@@ -444,11 +444,10 @@ public class DocumentEndpointTests
 
         response.StatusCode.Should().Be(HttpStatusCode.NoContent);
         factory.Store.Verify(s => s.DeleteDocumentAsync(DocA, It.IsAny<CancellationToken>()), Times.Once);
-        factory.Lucene.Verify(l => l.DeleteDocumentAsync(factory.IndexDirectory, DocA, It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task Delete_UnknownDocument_Returns404_AndTouchesNoLuceneData()
+    public async Task Delete_UnknownDocument_Returns404()
     {
         using var factory = NewFactory();
         factory.Store.Setup(s => s.DeleteDocumentAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>())).ReturnsAsync(false);
@@ -458,7 +457,6 @@ public class DocumentEndpointTests
 
         response.StatusCode.Should().Be(HttpStatusCode.NotFound);
         response.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
-        factory.Lucene.Verify(l => l.DeleteDocumentAsync(It.IsAny<string>(), It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -501,7 +499,6 @@ public class DocumentEndpointTests
         response.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
         (await response.Content.ReadAsStringAsync()).Should().Contain("did not stop");
         factory.Store.Verify(s => s.DeleteDocumentAsync(It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
-        factory.Lucene.Verify(l => l.DeleteDocumentAsync(It.IsAny<string>(), It.IsAny<Guid>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

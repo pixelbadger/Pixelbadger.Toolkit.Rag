@@ -4,31 +4,20 @@ using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
 
-/// <summary>Hybrid search: Lucene BM25 + SQL vector, fused with RRF, hydrated from SQL.</summary>
+/// <summary>Vector search over SQL Server (cosine similarity), hydrated from SQL.</summary>
 public class SearchService : ISearchService
 {
     public const int MaxQueryLength = 4096;
     public const int MaxResultsLimit = 100;
     public const int MaxDocumentIds = 100;
 
-    private readonly RagOptions _options;
-    private readonly ILuceneRepository _lucene;
     private readonly IDocumentStore _store;
     private readonly IEmbeddingService _embeddings;
-    private readonly IReranker _reranker;
 
-    public SearchService(
-        RagOptions options,
-        ILuceneRepository lucene,
-        IDocumentStore store,
-        IEmbeddingService embeddings,
-        IReranker reranker)
+    public SearchService(IDocumentStore store, IEmbeddingService embeddings)
     {
-        _options = options;
-        _lucene = lucene;
         _store = store;
         _embeddings = embeddings;
-        _reranker = reranker;
     }
 
     /// <inheritdoc />
@@ -40,29 +29,20 @@ public class SearchService : ISearchService
     {
         ValidateSearchRequest(queryText, maxResults, documentIds);
 
-        // Fetch more candidates from each side to improve fusion quality.
-        var fetchCount = Math.Max(maxResults * 2, 20);
-
-        var keywordTask = _lucene.SearchAsync(_options.IndexPath, queryText, fetchCount, documentIds, cancellationToken);
-        var vectorTask = VectorSearchAsync(queryText, fetchCount, documentIds, cancellationToken);
-        await Task.WhenAll(keywordTask, vectorTask);
-
-        var keywordIds = keywordTask.Result.Select(h => h.ChunkId).ToList();
-        var vectorIds = vectorTask.Result.Select(h => h.ChunkId).ToList();
-
-        var fused = _reranker.Fuse(keywordIds, vectorIds, maxResults);
-        if (fused.Count == 0)
+        var embedding = await _embeddings.EmbedQueryAsync(queryText, cancellationToken);
+        var hits = await _store.SearchAsync(embedding, maxResults, documentIds, cancellationToken);
+        if (hits.Count == 0)
         {
             return Array.Empty<SearchResult>();
         }
 
-        var records = await _store.GetChunksAsync(fused.Select(f => f.ChunkId).ToList(), cancellationToken);
+        var records = await _store.GetChunksAsync(hits.Select(h => h.ChunkId).ToList(), cancellationToken);
         var byId = records.ToDictionary(r => r.ChunkId);
 
-        var results = new List<SearchResult>(fused.Count);
-        foreach (var hit in fused)
+        var results = new List<SearchResult>(hits.Count);
+        foreach (var hit in hits)
         {
-            // A chunk can be missing from SQL if the Lucene index is stale; skip it.
+            // A chunk can be missing from SQL if its document was deleted between the search and the hydrate; skip it.
             if (!byId.TryGetValue(hit.ChunkId, out var record))
             {
                 continue;
@@ -70,7 +50,8 @@ public class SearchService : ISearchService
 
             results.Add(new SearchResult
             {
-                Score = hit.Score,
+                // The store reports cosine distance; callers get cosine similarity.
+                Score = 1f - hit.Distance,
                 ChunkId = record.ChunkGlobalId,
                 DocumentId = record.DocumentGlobalId,
                 SourcePath = record.SourcePath,
@@ -79,23 +60,11 @@ public class SearchService : ISearchService
                 Modality = record.Modality,
                 LocatorStart = record.LocatorStart,
                 LocatorEnd = record.LocatorEnd,
-                Content = record.Text,
-                KeywordRank = hit.KeywordRank,
-                VectorRank = hit.VectorRank
+                Content = record.Text
             });
         }
 
         return results;
-    }
-
-    private async Task<IReadOnlyList<VectorHit>> VectorSearchAsync(
-        string queryText,
-        int fetchCount,
-        IReadOnlyCollection<Guid>? documentIds,
-        CancellationToken cancellationToken)
-    {
-        var embedding = await _embeddings.EmbedQueryAsync(queryText, cancellationToken);
-        return await _store.SearchAsync(embedding, fetchCount, documentIds, cancellationToken);
     }
 
     private static void ValidateSearchRequest(string queryText, int maxResults, IReadOnlyCollection<Guid>? documentIds)

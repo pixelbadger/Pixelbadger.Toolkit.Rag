@@ -1,16 +1,18 @@
 # Pixelbadger.Toolkit.Rag
 
-An ASP.NET Core service for retrieval-augmented generation (RAG). Upload text, image and audio files over HTTP, and the service indexes them into a hybrid index and answers queries with **hybrid search**: Lucene.NET BM25 keyword search plus semantic vector search over SQL Server, fused with Reciprocal Rank Fusion (RRF). It can be queried over REST and through an **MCP server** (Streamable HTTP) for AI assistants.
+An ASP.NET Core service for retrieval-augmented generation (RAG). Upload text, image and audio files over HTTP, and the service embeds them and answers queries with **vector search** over SQL Server (cosine similarity). It can be queried over REST and through an **MCP server** (Streamable HTTP) for AI assistants.
 
 - **Embeddings run locally.** [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (ONNX, fp32, 256-d Matryoshka) via ONNX Runtime. No API key, no data leaves your machine, and the service never downloads a model.
-- **Storage is SQL Server 2025 / Azure SQL.** Documents, chunks (text and metadata), `vector(256)` embeddings and the ingest job queue live in SQL; Lucene holds only the BM25 index.
+- **Storage is SQL Server 2025 / Azure SQL.** Documents, chunks (text and metadata), `vector(256)` embeddings and the ingest job queue live in SQL, which is also the only search index.
 - **Multimodal.** Text (`.txt`, `.md`), images and audio are each ingested as their own documents and searched together.
 - **Document-centric REST.** `POST /api/documents` uploads one or more files and returns `202` with a server-assigned document id per file; a background worker processes each file from a persistent SQL queue (it survives restarts) and you poll `GET /api/documents/{id}`. Re-ingest a document with `POST /api/documents/{id}`, delete it with `DELETE /api/documents/{id}`.
 - **MCP server.** `/mcp` exposes a single `Search` tool over Streamable HTTP. Uploading and deleting are REST-only.
 
+> **Version 4.0 is a breaking change from 3.x.** BM25 keyword search (Lucene), hybrid fusion and the RRF reranker are removed: search is now **pure vector search** over SQL Server. In hybrid mode image and audio chunks could only score from the vector list, so they were systematically under-ranked against text; ranking by one metric treats all modalities alike. In responses, `keywordRank` and `vectorRank` are gone and `score` is now the cosine similarity (1 - cosine distance; higher is more similar) instead of a fused RRF score. `Rag:IndexPath` / `PBRAG_INDEX_PATH` are removed (ignored if still set; the old index directory can be deleted). No re-upload is needed: the SQL data is unchanged.
+
 > **Version 3.0 is a breaking change from 2.x.** The `pbrag` CLI, the stdio MCP transport and the dotnet-tool package are gone: the application is now a web service shipped as a container image (on GHCR). Ingest is upload-only (the server never reads caller-named paths from its own disk, so `--content-path`, folder ingestion, `--allow-symlinks` and `--max-files` no longer exist), `pbrag query` became `POST /api/query`, and `pbrag serve` became `/mcp`. Configuration moved from command-line options to the `Rag` configuration section (the `PBRAG_*` variables still work as fallbacks). Documents are no longer identified by their path: each upload creates a document with a **server-assigned GUID id**, the path is only metadata (the same path uploaded twice is two documents), and the search filter `sourceIds` became `documentIds` (GUIDs). 2.0 was itself a breaking change from 1.x (OpenAI embeddings and SQLite-vec removed, hybrid-only search).
 >
-> **Upgrading from 2.x requires a fresh Lucene index directory and re-uploading your content.** Document ids cannot be converted, so the 3.0 migration drops and recreates the `Documents`, `Chunks_EG2_256` and ingest job tables (all existing data in them is lost). Point `Rag:IndexPath` at a new, empty directory (or empty the old one) before starting 3.0, then upload your files again.
+> **Upgrading from 2.x requires re-uploading your content.** Document ids cannot be converted, so the 3.0 migration drops and recreates the `Documents`, `Chunks_EG2_256` and ingest job tables (all existing data in them is lost). Upload your files again after starting 3.0.
 
 ## Table of Contents
 
@@ -78,7 +80,7 @@ Audio ingestion decodes files with `ffmpeg` (16 kHz mono). Install it and make s
 
 ### Docker
 
-Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`3.0.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string and a volume for the Lucene index.
+Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`4.0.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string.
 
 ```bash
 docker pull ghcr.io/pixelbadger/pixelbadger.toolkit.rag:latest
@@ -86,7 +88,6 @@ docker pull ghcr.io/pixelbadger/pixelbadger.toolkit.rag:latest
 docker run -d --name pbrag -p 8080:8080 \
   -e Rag__ConnectionString='Server=host.docker.internal,1433;User Id=sa;Password=Pbrag_Dev_Pass1!;TrustServerCertificate=True;Encrypt=False' \
   -v ~/models/embeddinggemma-2-onnx:/models/embeddinggemma-2-onnx:ro \
-  -v pbrag-data:/data \
   ghcr.io/pixelbadger/pixelbadger.toolkit.rag:latest
 
 curl http://localhost:8080/health
@@ -96,7 +97,7 @@ To build the image yourself instead: `docker build -t pixelbadger-rag .`.
 
 > The package is created private the first time the workflow pushes it. If anonymous `docker pull` is denied, a repository admin has to set the package's visibility to public once (GitHub: *Packages* > `pixelbadger.toolkit.rag` > *Package settings* > *Change visibility*).
 
-The image defaults `Rag__ModelPath=/models/embeddinggemma-2-onnx` and `Rag__IndexPath=/data/index`.
+The image defaults `Rag__ModelPath=/models/embeddinggemma-2-onnx`.
 
 ### With .NET Aspire (local orchestration)
 
@@ -109,21 +110,20 @@ dotnet user-secrets set Parameters:model-path ~/models/embeddinggemma-2-onnx --p
 dotnet run --project Pixelbadger.Toolkit.Rag.AppHost     # or: aspire run
 ```
 
-The dashboard URL is printed at startup; the service listens on `http://localhost:8080` as before. Without the secret, the dashboard asks for `model-path`. The Lucene index is the project's `./index` (from `appsettings.Development.json`, which also forces exact vector search locally). The connection string is injected as `Rag__ConnectionString`.
+The dashboard URL is printed at startup; the service listens on `http://localhost:8080` as before. Without the secret, the dashboard asks for `model-path`. `appsettings.Development.json` forces exact vector search locally. The connection string is injected as `Rag__ConnectionString`.
 
 ### From source (.NET 10 SDK)
 
 ```bash
 export PBRAG_CONNECTION_STRING='Server=localhost,1433;User Id=sa;Password=Pbrag_Dev_Pass1!;TrustServerCertificate=True;Encrypt=False'
 export PBRAG_MODEL_PATH=~/models/embeddinggemma-2-onnx
-export PBRAG_INDEX_PATH=./index
 
 dotnet run --project Pixelbadger.Toolkit.Rag --urls http://localhost:8080
 ```
 
-The service refuses to start (with a clear message and exit code 1) when the index path, connection string or model path is missing, or the model directory does not exist. Validation never loads the model or connects to SQL.
+The service refuses to start (with a clear message and exit code 1) when the connection string or model path is missing, or the model directory does not exist. Validation never loads the model or connects to SQL.
 
-> **One instance per index.** The Lucene index directory has a single writer, and the ingest worker processes one job at a time. Run exactly one instance per index directory and database; multiple instances are not supported. The code relies on that: at startup any job still `Processing` is put back to `Queued` (it belonged to the previous process), and deletes are serialised with ingest writes by an in-process lock.
+> **One instance per database.** The ingest worker processes one job at a time and the code assumes it is the only worker: at startup any job still `Processing` is put back to `Queued` (it belonged to the previous process), and a delete cancels the running job through an in-process registry. Run exactly one instance per database; multiple instances are not supported.
 
 ## Deploying to Azure
 
@@ -132,9 +132,9 @@ The same AppHost describes the Azure deployment. `azd up` (or `aspire deploy`) p
 | Resource | Details |
 |---|---|
 | Azure Container Apps environment | Consumption workload profile, Log Analytics, Aspire dashboard, Azure Container Registry. |
-| Container App `rag` | The repository's `Dockerfile` image (includes ffmpeg). **4 vCPU / 8 GiB** (the Consumption profile maximum). **Scales to zero, at most one replica** (one instance owns the index and the queue). A request wakes it; it stays up while it serves requests or the ingest worker has work (see below), then scales to zero. External HTTPS ingress on port 8080. |
+| Container App `rag` | The repository's `Dockerfile` image (includes ffmpeg). **4 vCPU / 8 GiB** (the Consumption profile maximum). **Scales to zero, at most one replica** (one instance owns the ingest queue). A request wakes it; it stays up while it serves requests or the ingest worker has work (see below), then scales to zero. External HTTPS ingress on port 8080. |
 | Storage queue `ingest-active` | The ingest worker's keep-alive marker, watched by the app's queue scale rule. The app gets *Storage Queue Data Contributor* only. |
-| Azure Files share mounted at `/data` | Holds the Lucene index (`/data/index`) and the model (`/data/models/embeddinggemma-2-onnx`). Mounted as the container's `app` user. |
+| Azure Files share mounted at `/data` | Holds the model (`/data/models/embeddinggemma-2-onnx`). Mounted as the container's `app` user. |
 | Azure SQL Database `ragdb` | The free offer (General Purpose serverless, auto-pauses when idle), set to **bill overage** rather than pause for the rest of the month once the free allowance is used. Entra ID only: the app connects with its user-assigned managed identity (`Authentication="Active Directory Default"`), which the deployment adds to the database as `db_owner` so migrations can run at startup. |
 
 ```bash
@@ -157,8 +157,7 @@ Things to know:
 - **Scale to zero and ingest.** The ingest worker runs inside the app. While it has work it keeps a marker message in the `ingest-active` queue, and a queue-length scale rule keeps the replica running until the worker finds the job queue empty and clears the marker, so a long ingest is not cut off when HTTP traffic stops. If the marker cannot be written (storage unreachable) the app may scale down mid-ingest: nothing is lost, the job resumes on the next start. A marker left by a crashed process expires after 2 hours, or is cleared as soon as the app next goes idle.
 - **Cold starts.** The first request after an idle period starts the container, resumes the database (it auto-pauses when nothing uses it) and loads the model from the file share: expect it to take a while, and MCP clients may time out on that first call.
 - **Cost.** Idle costs nothing for compute; you pay per second while the app is awake (after the Consumption plan's monthly free grant), plus the database beyond its free allowance, the file share and the container registry (Basic tier, a small fixed monthly cost).
-- **Deployments briefly overlap.** Container Apps starts a new revision before it stops the old one, so for a short time two instances share the index and the queue. Avoid deploying while ingest jobs are running (the app stays up while the queue has work, so this means after the queue drains); a job the old instance was processing is requeued by the new one at startup.
-- **Lucene on Azure Files (SMB).** The index lives on a network share (`nobrl` mount option: Lucene's lock file uses client-side locks, which is safe with one instance). Expect slower ingest and BM25 queries than on local disk.
+- **Deployments briefly overlap.** Container Apps starts a new revision before it stops the old one, so for a short time two instances share the queue. Avoid deploying while ingest jobs are running (the app stays up while the queue has work, so this means after the queue drains); a job the old instance was processing is requeued by the new one at startup.
 
 ## Configuration
 
@@ -166,7 +165,6 @@ Configuration is read from the `Rag` section: `appsettings.json`, environment va
 
 | Key | Fallback env var | Default | Description |
 |---|---|---|---|
-| `Rag:IndexPath` | `PBRAG_INDEX_PATH` | | **Required.** Lucene BM25 index directory (created if missing). |
 | `Rag:ConnectionString` | `PBRAG_CONNECTION_STRING` | | **Required.** SQL Server 2025 / Azure SQL connection string. |
 | `Rag:ModelPath` | `PBRAG_MODEL_PATH` | | **Required.** Local EmbeddingGemma 2 ONNX snapshot directory (must exist). |
 | `Rag:ExactVectorSearch` | | `false` | Always use exact `VECTOR_DISTANCE` instead of the approximate vector index. |
@@ -180,7 +178,7 @@ Configuration is read from the `Rag` section: `appsettings.json`, environment va
 | `Rag:Ingest:CancelTimeoutSeconds` | | `30` | How long `DELETE /api/documents/{id}` waits for the document's running job to stop before answering `409`. |
 | `ConnectionStrings:ingest-active` | | | Optional. Azure Storage queue for the ingest keep-alive marker (scale-to-zero hosting). Set by the Aspire AppHost; without it the worker does not signal. |
 
-The SQL database and the Lucene index belong together: use one index directory per SQL database, and re-upload your documents if you delete either.
+Search data lives only in the SQL database. `Rag:IndexPath` and `PBRAG_INDEX_PATH` are no longer read; delete any old index directory.
 
 ## HTTP API
 
@@ -192,7 +190,7 @@ Errors are [RFC 9457 problem details](https://www.rfc-editor.org/rfc/rfc9457) (`
 | `GET` | `/api/documents/{id}` | A document with the status of its latest job. |
 | `POST` | `/api/documents/{id}` | Re-ingest a document with a new version of its file. |
 | `DELETE` | `/api/documents/{id}` | Cancel the document's active job and delete the document. |
-| `POST` | `/api/query` | Hybrid search. |
+| `POST` | `/api/query` | Vector search. |
 | any | `/mcp` | MCP Streamable HTTP (`Search` tool). |
 | `GET` | `/health` | Liveness (touches neither SQL nor the model). |
 
@@ -262,7 +260,7 @@ curl -i -X POST http://localhost:8080/api/documents/0f8fad5b-d9cb-469f-a165-7086
 curl -i -X DELETE http://localhost:8080/api/documents/0f8fad5b-d9cb-469f-a165-70867728950e
 ```
 
-Cancels the document's active job (queued or running; a running one is stopped and awaited), then deletes the document: its SQL rows (chunks and jobs) and its Lucene entries. `204` on success, `404` for an unknown id, `409` if the running job did not stop within `Rag:Ingest:CancelTimeoutSeconds` (nothing is deleted; retry).
+Cancels the document's active job (queued or running; a running one is stopped and awaited), then deletes the document: its SQL rows (chunks and jobs). `204` on success, `404` for an unknown id, `409` if the running job did not stop within `Rag:Ingest:CancelTimeoutSeconds` (nothing is deleted; retry).
 
 ### Query
 
@@ -278,7 +276,7 @@ curl -X POST http://localhost:8080/api/query \
 | `maxResults` | 10 | 1 to 100. |
 | `documentIds` | | Restrict results to these documents (GUIDs, up to 100). A value that is not a GUID returns `400`. |
 
-A blank query or invalid argument returns `400`. The response is `{ "results": [...] }`; each result has `score`, `chunkId`, `documentId`, `sourcePath` (the document's path), `sourceFile`, `ordinal`, `modality` (`Text`, `Image` or `Audio`), `locatorStart` / `locatorEnd` (character offsets for text, milliseconds for audio, null for images), `content` (text chunks only), and `keywordRank` / `vectorRank` (1-based rank in each list, null when absent from it).
+A blank query or invalid argument returns `400`. The response is `{ "results": [...] }`; each result has `score` (cosine similarity, 1 - cosine distance; higher is more similar), `chunkId`, `documentId`, `sourcePath` (the document's path), `sourceFile`, `ordinal`, `modality` (`Text`, `Image` or `Audio`), `locatorStart` / `locatorEnd` (character offsets for text, milliseconds for audio, null for images), `content` (text chunks only).
 
 ## MCP server
 
@@ -313,7 +311,7 @@ Other clients that take a JSON config:
 | `maxResults` | int, default 5 | Maximum number of results (1 to 100). |
 | `documentIds` | string[], optional | Restrict results to specific documents (GUIDs). A value that is not a GUID is returned as a tool error. |
 
-There is no search-mode parameter: every search is hybrid. Results carry the chunk id, document id, source, modality, locator and content. All returned content is framed as **untrusted document text**: clients must treat it as data, not instructions. Invalid arguments return their message as a tool error; unexpected failures return a generic error and are logged.
+There is no search-mode parameter: every search is a vector search. Results carry the chunk id, document id, source, modality, locator and content. All returned content is framed as **untrusted document text**: clients must treat it as data, not instructions. Invalid arguments return their message as a tool error; unexpected failures return a generic error and are logged.
 
 ## Supported content
 
@@ -323,7 +321,7 @@ There is no search-mode parameter: every search is hybrid. Results carry the chu
 | Image | `.png` `.jpg` `.jpeg` `.webp` `.gif` `.bmp` `.tif` `.tiff` | One chunk per image, embedded by the vision encoder (not OCR'd). Matched by text queries; results show `[image]`. |
 | Audio | `.wav` `.mp3` `.m4a` `.flac` `.ogg` `.opus` `.aac` | About 30-second windows, one chunk each, with millisecond locators. Requires ffmpeg. Results show `[audio mm:ss–mm:ss]`. |
 
-Video and images embedded inside documents are not supported. Only text chunks participate in BM25; image and audio chunks are found through the vector side of the hybrid search.
+Video and images embedded inside documents are not supported. Text, image and audio chunks are ranked together by vector similarity.
 
 ## How it works
 
@@ -333,16 +331,16 @@ Ingest:  POST /api/documents (multipart) -> validate -> SQL: Document (Queued) +
               text : reader -> chunker -> EmbeddingGemma 2 (text)
               image: decode -> patchify -> vision encoder -> EmbeddingGemma 2
               audio: ffmpeg -> log-mel windows -> audio encoder -> EmbeddingGemma 2
-          -> SQL Server (Chunk + vector(256), replacing the document's chunks) -> Lucene (text chunks, keyed by chunk id)
+          -> SQL Server (Chunk + vector(256), replacing the document's chunks)
          -> job done (bytes discarded) -> vector index built once the queue is idle
-Delete:  DELETE /api/documents/{id} -> cancel the running job and wait -> delete SQL rows (cascade) + Lucene entries
+Delete:  DELETE /api/documents/{id} -> cancel the running job and wait -> delete SQL rows (cascade)
 
-Search:  query -> [Lucene BM25 top-N | SQL vector top-N] -> RRF (k = 60) -> hydrate from SQL -> results
+Search:  query -> embed -> SQL vector top-N (cosine) -> hydrate from SQL -> results
 ```
 
-**Domain model.** A `Document` is one uploaded file; it has an integer primary key and a unique `Guid` global id assigned by the server when it is created (a version 7 GUID; the path plays no part in it). A `Document` has many `Chunk`s and many ingest jobs; a chunk has an integer clustered primary key (the id Lucene stores), a unique `Guid` global id (shown to users as the chunk id), the document foreign key, its ordinal, modality, locator range, text (text chunks only) and the 256-d embedding. Chunks are stored in `dbo.Chunks_EG2_256`. The `EG2_256` suffix names the model and dimension; changing either means a new table and a full re-embed.
+**Domain model.** A `Document` is one uploaded file; it has an integer primary key and a unique `Guid` global id assigned by the server when it is created (a version 7 GUID; the path plays no part in it). A `Document` has many `Chunk`s and many ingest jobs; a chunk has an integer clustered primary key, a unique `Guid` global id (shown to users as the chunk id), the document foreign key, its ordinal, modality, locator range, text (text chunks only) and the 256-d embedding. Chunks are stored in `dbo.Chunks_EG2_256`. The `EG2_256` suffix names the model and dimension; changing either means a new table and a full re-embed.
 
-**Hybrid search.** BM25 and vector search each fetch `max(2n, 20)` candidates; ranks are fused with `1 / (60 + rank)` and summed for chunks that appear in both lists. Final results are hydrated from SQL, so Lucene never needs to store content.
+**Vector search.** The query is embedded and the `n` nearest chunks by cosine distance are fetched from SQL (approximate DiskANN `VECTOR_SEARCH` when the index exists, otherwise exact `VECTOR_DISTANCE`). Results are hydrated from SQL and keep that order; `score` is `1 - distance`.
 
 **Embeddings.** 256 dimensions (the first 256 of the model's Matryoshka output, re-normalised to unit length). Queries and documents use EmbeddingGemma's asymmetric prompts.
 
@@ -365,7 +363,7 @@ dotnet test
 
 ## Evaluations
 
-[`EVALS.md`](EVALS.md) and [`docs/bm25-vs-hybrid-analysis.md`](docs/bm25-vs-hybrid-analysis.md) are historical (pre-2.0, OpenAI embeddings, the old CLI) and kept for context.
+[`EVALS.md`](EVALS.md) and [`docs/bm25-vs-hybrid-analysis.md`](docs/bm25-vs-hybrid-analysis.md) are historical (pre-2.0, OpenAI embeddings, the old CLI, and an evaluation of BM25 and hybrid search that predates the vector-only search of 4.0) and kept for context.
 
 ## License
 

@@ -12,15 +12,12 @@ using Pixelbadger.Toolkit.Rag.Persistence;
 namespace Pixelbadger.Toolkit.Rag.Components;
 
 /// <summary>
-/// Ingestion pipeline. Text: reader, chunker, embed, SQL, Lucene. Image: one chunk. Audio: one chunk
-/// per window. Only text chunks go into the Lucene BM25 index.
+/// Ingestion pipeline. Text: reader, chunker, embed, SQL. Image: one chunk. Audio: one chunk per window.
+/// Every chunk is stored with its embedding in SQL, which is the only index.
 /// </summary>
 public class ContentIngester : IContentIngester
 {
-    private readonly RagOptions _options;
     private readonly IDocumentStore _store;
-    private readonly ILuceneRepository _lucene;
-    private readonly IndexWriteGate _gate;
     private readonly IEmbeddingService _embeddings;
     private readonly ChunkerFactory _chunkerFactory;
     private readonly FileReaderFactory _fileReaderFactory;
@@ -29,10 +26,7 @@ public class ContentIngester : IContentIngester
     private readonly ILogger<ContentIngester> _logger;
 
     public ContentIngester(
-        RagOptions options,
         IDocumentStore store,
-        ILuceneRepository lucene,
-        IndexWriteGate gate,
         IEmbeddingService embeddings,
         ChunkerFactory chunkerFactory,
         FileReaderFactory fileReaderFactory,
@@ -40,10 +34,7 @@ public class ContentIngester : IContentIngester
         IAudioPreprocessor audioPreprocessor,
         ILogger<ContentIngester> logger)
     {
-        _options = options;
         _store = store;
-        _lucene = lucene;
-        _gate = gate;
         _embeddings = embeddings;
         _chunkerFactory = chunkerFactory;
         _fileReaderFactory = fileReaderFactory;
@@ -92,7 +83,6 @@ public class ContentIngester : IContentIngester
             modality,
             await ComputeContentHashAsync(source.LocalPath, cancellationToken));
 
-        // Embedding (the slow part) happens outside the gate; only the SQL + Lucene writes are serialised with deletes.
         var chunks = modality switch
         {
             Modality.Text => await BuildTextChunksAsync(source.LocalPath, fileName, logicalPath, options, cancellationToken),
@@ -100,45 +90,9 @@ public class ContentIngester : IContentIngester
             _ => await BuildAudioChunksAsync(source.LocalPath, cancellationToken)
         };
 
-        using (await _gate.EnterAsync(cancellationToken))
-        {
-            // Throws DocumentNotFoundException when the document was deleted meanwhile (nothing is written).
-            var records = await _store.ReplaceDocumentAsync(documentId, draft, chunks, cancellationToken);
-
-            try
-            {
-                // Image/audio chunks are vector-only: BM25 indexes text chunks.
-                var luceneChunks = records
-                    .Where(r => r.Modality == Modality.Text && !string.IsNullOrWhiteSpace(r.Text))
-                    .Select(r => new LuceneChunk(r.ChunkId, r.Text!))
-                    .ToList();
-
-                if (luceneChunks.Count > 0 || modality == Modality.Text)
-                {
-                    // Always called for text so stale entries of a previous version are removed.
-                    await _lucene.ReplaceDocumentAsync(_options.IndexPath, documentId, luceneChunks, cancellationToken);
-                }
-            }
-            catch
-            {
-                await TrySetFailedAsync(documentId);
-                throw;
-            }
-
-            return new IngestResult(logicalPath, documentId, modality, records.Count);
-        }
-    }
-
-    private async Task TrySetFailedAsync(Guid documentId)
-    {
-        try
-        {
-            await _store.SetIndexStatusAsync(documentId, IndexStatus.Failed, CancellationToken.None);
-        }
-        catch
-        {
-            // Best effort: the original Lucene failure is the error worth reporting.
-        }
+        // One transaction. Throws DocumentNotFoundException when the document was deleted meanwhile (nothing is written).
+        var records = await _store.ReplaceDocumentAsync(documentId, draft, chunks, cancellationToken);
+        return new IngestResult(logicalPath, documentId, modality, records.Count);
     }
 
     private async Task<List<ChunkDraft>> BuildTextChunksAsync(string filePath, string title, string logicalPath, IngestOptions options, CancellationToken cancellationToken)
