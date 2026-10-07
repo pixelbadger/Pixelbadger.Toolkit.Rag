@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Text.Json;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Pixelbadger.Toolkit.Rag.Ingestion;
@@ -59,6 +61,26 @@ public sealed class BusHarness : IAsyncDisposable
         if (!bus.IsStarted)
             throw new TimeoutException("The bus did not start.");
     }
+
+    /// <summary>
+    /// Every <see cref="JobStatusChanged"/> written to the outbox so far, oldest first (with the bus stopped, events
+    /// stay there; once started, sent rows are kept until the outbox clean-up removes them).
+    /// </summary>
+    public async Task<IReadOnlyList<JobStatusChanged>> PublishedEventsAsync()
+    {
+        await using var connection = new SqlConnection(Options.Sql.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new SqlCommand(
+            $"IF OBJECT_ID(N'dbo.{JobEvents.OutboxTable}') IS NOT NULL SELECT MessagePayload FROM dbo.{JobEvents.OutboxTable} ORDER BY Timestamp, Id",
+            connection);
+        var events = new List<JobStatusChanged>();
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+            events.Add(JsonSerializer.Deserialize<JobStatusChanged>((byte[])reader[0], PayloadOptions)!);
+        return events;
+    }
+
+    private static readonly JsonSerializerOptions PayloadOptions = new(JsonSerializerDefaults.Web);
 
     public async ValueTask DisposeAsync()
     {

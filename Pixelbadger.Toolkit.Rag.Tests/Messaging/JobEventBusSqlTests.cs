@@ -98,6 +98,25 @@ public class JobEventBusSqlTests(SqlServerFixture sql)
     }
 
     [SkippableFact]
+    public async Task PublishedEvents_CanBeReadBackFromTheOutbox()
+    {
+        var (bus, _) = await CreateAsync();
+        await using var _ = bus;
+        var jobId = Guid.CreateVersion7();
+        (await bus.PublishedEventsAsync()).Should().BeEmpty();
+
+        await using (var tx = await JobEventTransaction.BeginAsync(bus.Scopes))
+        {
+            await tx.PublishAsync(jobId, IngestJobStatus.Queued);
+            await tx.PublishAsync(jobId, IngestJobStatus.Processing);
+            await tx.CommitAsync();
+        }
+
+        (await bus.PublishedEventsAsync()).Should().Equal(
+            new JobStatusChanged(jobId, IngestJobStatus.Queued), new JobStatusChanged(jobId, IngestJobStatus.Processing));
+    }
+
+    [SkippableFact]
     public async Task AFailingHandler_IsRedelivered()
     {
         var (bus, recorder) = await CreateAsync();
