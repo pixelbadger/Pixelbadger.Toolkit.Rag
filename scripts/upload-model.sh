@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Uploads the local EmbeddingGemma 2 ONNX snapshot to the Azure Files share that the Container App mounts at /data,
+# Uploads the local EmbeddingGemma 2 ONNX snapshot (the q8 graphs, onnx/*_quantized.onnx) to the Azure Files share that the Container App mounts at /data,
 # as /data/models/embeddinggemma-2-onnx (the service never downloads models). Run it once after the first
 # provision, and again with --force after changing the model files.
 #
@@ -33,9 +33,9 @@ if [ -z "$model_dir" ]; then
 fi
 
 for f in tokenizer.json config.json processor_config.json \
-         onnx/model.onnx onnx/model.onnx_data \
-         onnx/vision_encoder.onnx onnx/vision_encoder.onnx_data \
-         onnx/audio_encoder.onnx onnx/audio_encoder.onnx_data; do
+         onnx/model_quantized.onnx \
+         onnx/vision_encoder_quantized.onnx \
+         onnx/audio_encoder_quantized.onnx; do
   if [ ! -f "$model_dir/$f" ]; then
     echo "Missing $model_dir/$f (see the README for the files to download)." >&2
     exit 1
@@ -67,19 +67,21 @@ key="$(az storage account keys list --resource-group "$rg" --account-name "$acco
 
 dest="models/embeddinggemma-2-onnx"
 if [ "$force" = false ] && [ "$(az storage file exists --account-name "$account" --account-key "$key" --share-name "$share" \
-    --path "$dest/onnx/audio_encoder.onnx_data" --query exists --output tsv)" = "true" ]; then
+    --path "$dest/onnx/audio_encoder_quantized.onnx" --query exists --output tsv)" = "true" ]; then
   echo "The model is already in share '$share' ($account). Use --force to upload it again."
   exit 0
 fi
 
-echo "Uploading $model_dir to $account/$share/$dest (about 3 GB)..."
+echo "Uploading $model_dir to $account/$share/$dest (q8 graphs)..."
 az storage directory create --account-name "$account" --account-key "$key" --share-name "$share" --name models --output none
 az storage directory create --account-name "$account" --account-key "$key" --share-name "$share" --name "$dest" --output none
 az storage directory create --account-name "$account" --account-key "$key" --share-name "$share" --name "$dest/onnx" --output none
+# .onnx_data sidecars are optional: uploaded when the q8 graph has one.
 for f in tokenizer.json config.json processor_config.json \
-         onnx/model.onnx onnx/model.onnx_data \
-         onnx/vision_encoder.onnx onnx/vision_encoder.onnx_data \
-         onnx/audio_encoder.onnx onnx/audio_encoder.onnx_data; do
+         onnx/model_quantized.onnx onnx/model_quantized.onnx_data \
+         onnx/vision_encoder_quantized.onnx onnx/vision_encoder_quantized.onnx_data \
+         onnx/audio_encoder_quantized.onnx onnx/audio_encoder_quantized.onnx_data; do
+  case "$f" in *.onnx_data) [ -f "$model_dir/$f" ] || continue ;; esac
   echo "  $f"
   az storage file upload --account-name "$account" --account-key "$key" --share-name "$share" \
     --source "$model_dir/$f" --path "$dest/$f" --output none

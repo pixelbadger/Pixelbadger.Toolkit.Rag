@@ -2,18 +2,20 @@
 
 An ASP.NET Core service for retrieval-augmented generation (RAG). Upload text, image and audio files over HTTP, and the service embeds them and answers queries with **vector search** over SQL Server (cosine similarity). It can be queried over REST and through an **MCP server** (Streamable HTTP) for AI assistants.
 
-- **Embeddings run locally.** [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (ONNX, fp32, 256-d Matryoshka) via ONNX Runtime. No API key, no data leaves your machine, and the service never downloads a model.
+- **Embeddings run locally.** [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (ONNX, q8 quantised, 256-d Matryoshka) via ONNX Runtime. No API key, no data leaves your machine, and the service never downloads a model.
 - **Storage is SQL Server 2025 / Azure SQL.** Documents, chunks (text and metadata), `vector(256)` embeddings and the ingest job queue live in SQL, which is also the only search index.
 - **Multimodal.** Text (`.txt`, `.md`), images and audio are each ingested as their own documents and searched together.
 - **Document-centric REST.** `POST /api/documents` uploads one or more files and returns `202` with a server-assigned document id per file; a background worker processes each file from a persistent SQL queue (it survives restarts) and you poll `GET /api/documents/{id}`. Re-ingest a document with `POST /api/documents/{id}`, delete it with `DELETE /api/documents/{id}`.
 - **MCP server.** `/mcp` exposes a single `Search` tool over Streamable HTTP. Uploading and deleting are REST-only.
 - **Browser UI.** The service serves a small React app at `/` (same origin as the API): a live jobs dashboard (`/`), a query page that shows the ranked chunks with links back to each source file (`/query`), and an upload page (`/ingest`). It is an operational UI over the REST API, not a chat interface.
 
+> **Version 5.0 is a breaking change from 4.x: it deletes all your documents.** The embedding model moves from the fp32 to the q8 (8-bit quantised) ONNX graphs of EmbeddingGemma 2. Vectors from the two are not compatible and there is no conversion, so the 5.0 migration (`QuantizedEmbeddingsQ8`) **deletes every document, chunk and ingest job (including job history)** and replaces `dbo.Chunks_EG2_256` with `dbo.Chunks_EG2Q8_256`. Before starting 5.0, download the q8 model files (see [the model section](#2-the-embeddinggemma-2-model-local-copy)); on Azure, re-run `scripts/upload-model.sh` (or `azd up`, whose postprovision hook does it). Then upload your content again.
+
 > **Version 4.0 is a breaking change from 3.x.** BM25 keyword search (Lucene), hybrid fusion and the RRF reranker are removed: search is now **pure vector search** over SQL Server. In hybrid mode image and audio chunks could only score from the vector list, so they were systematically under-ranked against text; ranking by one metric treats all modalities alike. In responses, `keywordRank` and `vectorRank` are gone and `score` is now the cosine similarity (1 - cosine distance; higher is more similar) instead of a fused RRF score. `Rag:IndexPath` / `PBRAG_INDEX_PATH` are removed (ignored if still set; the old index directory can be deleted). No re-upload is needed: the SQL data is unchanged.
 
 > **Version 3.0 is a breaking change from 2.x.** The `pbrag` CLI, the stdio MCP transport and the dotnet-tool package are gone: the application is now a web service shipped as a container image (on GHCR). Ingest is upload-only (the server never reads caller-named paths from its own disk, so `--content-path`, folder ingestion, `--allow-symlinks` and `--max-files` no longer exist), `pbrag query` became `POST /api/query`, and `pbrag serve` became `/mcp`. Configuration moved from command-line options to the `Rag` configuration section (the `PBRAG_*` variables still work as fallbacks). Documents are no longer identified by their path: each upload creates a document with a **server-assigned GUID id**, the path is only metadata (the same path uploaded twice is two documents), and the search filter `sourceIds` became `documentIds` (GUIDs). 2.0 was itself a breaking change from 1.x (OpenAI embeddings and SQLite-vec removed, hybrid-only search).
 >
-> **Upgrading from 2.x requires re-uploading your content.** Document ids cannot be converted, so the 3.0 migration drops and recreates the `Documents`, `Chunks_EG2_256` and ingest job tables (all existing data in them is lost). Upload your files again after starting 3.0.
+> **Upgrading from 2.x requires re-uploading your content.** Document ids cannot be converted, so the 3.0 migration drops and recreates the `Documents`, chunk (then `Chunks_EG2_256`) and ingest job tables (all existing data in them is lost). Upload your files again after starting 3.0.
 
 ## Table of Contents
 
@@ -60,18 +62,18 @@ pip install -U "huggingface_hub[cli]"
 huggingface-cli download onnx-community/embeddinggemma-2-ONNX \
   --local-dir ~/models/embeddinggemma-2-onnx \
   --include "tokenizer.json" "tokenizer_config.json" "config.json" "processor_config.json" \
-            "onnx/model.onnx" "onnx/model.onnx_data" \
-            "onnx/vision_encoder.onnx" "onnx/vision_encoder.onnx_data" \
-            "onnx/audio_encoder.onnx" "onnx/audio_encoder.onnx_data"
+            "onnx/model_quantized.onnx*" \
+            "onnx/vision_encoder_quantized.onnx*" \
+            "onnx/audio_encoder_quantized.onnx*"
 
 export PBRAG_MODEL_PATH=~/models/embeddinggemma-2-onnx
 ```
 
 Notes:
 
-- Use the **fp32** text model (`onnx/model.onnx`) plus the **vision** and **audio encoders**. The quantised and fp16 variants are not used (fp16 is unsuitable on CPU).
-- Each `.onnx_data` file **must sit beside its `.onnx`** with its original name: the external-data reference is by filename.
-- Disk use is roughly 3 GB (text 1.1 GB, vision 0.7 GB, audio 1.2 GB). Queries only load the text model; the vision and audio encoders load lazily when an image or audio file is ingested.
+- Use the **q8** (8-bit quantised) graphs: `onnx/model_quantized.onnx` (text) plus `onnx/vision_encoder_quantized.onnx` and `onnx/audio_encoder_quantized.onnx`. The fp32 (`model.onnx` etc.) and fp16 variants are not used. The trailing `*` in the `--include` patterns also fetches a `.onnx_data` sidecar when a graph has one; sidecars are optional.
+- A `.onnx_data` file, when present, **must sit beside its `.onnx`** with its original name: the external-data reference is by filename.
+- Disk use is roughly a quarter of the fp32 snapshot. Queries only load the text model; the vision and audio encoders load lazily when an image or audio file is ingested.
 
 ### 3. ffmpeg (audio only)
 
@@ -81,7 +83,7 @@ Audio ingestion decodes files with `ffmpeg` (16 kHz mono). Install it and make s
 
 ### Docker
 
-Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`4.1.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string.
+Every merge to `master` publishes the image to the GitHub Container Registry as `ghcr.io/pixelbadger/pixelbadger.toolkit.rag`, tagged with the version (`5.0.0`), `latest` and `sha-<short commit>`. The image contains the service and ffmpeg, but **not** the model: mount your local copy of the EmbeddingGemma 2 snapshot read-only, and give it a SQL Server connection string.
 
 ```bash
 docker pull ghcr.io/pixelbadger/pixelbadger.toolkit.rag:latest
@@ -148,7 +150,7 @@ export PBRAG_MODEL_PATH=~/models/embeddinggemma-2-onnx   # lets the postprovisio
 azd up                                                   # pick a subscription, location and environment name
 ```
 
-**The model.** The service never downloads models, so the ~3 GB snapshot has to be uploaded to the file share once. `azd up` does that in its `postprovision` hook when `PBRAG_MODEL_PATH` is set (it skips the upload when the model is already there). Otherwise, or with `aspire deploy`, run it yourself after provisioning (needs the Azure CLI, signed in):
+**The model.** The service never downloads models, so the model snapshot (q8 files) has to be uploaded to the file share once. `azd up` does that in its `postprovision` hook when `PBRAG_MODEL_PATH` is set (it skips the upload when the q8 model is already there; the marker is `onnx/audio_encoder_quantized.onnx`, so the first run after upgrading to 5.0 uploads the q8 files next to the old fp32 ones, which are no longer used and can be deleted from the share). Otherwise, or with `aspire deploy`, run it yourself after provisioning (needs the Azure CLI, signed in):
 
 ```bash
 AZURE_RESOURCE_GROUP=rg-<environment> scripts/upload-model.sh ~/models/embeddinggemma-2-onnx   # --force re-uploads
@@ -395,11 +397,11 @@ Delete:  DELETE /api/documents/{id} -> cancel the running job and wait -> delete
 Search:  query -> embed -> SQL vector top-N (cosine) -> hydrate from SQL -> results
 ```
 
-**Domain model.** A `Document` is one uploaded file; it has an integer primary key and a unique `Guid` global id assigned by the server when it is created (a version 7 GUID; the path plays no part in it). A `Document` has many `Chunk`s and many ingest jobs; a chunk has an integer clustered primary key, a unique `Guid` global id (shown to users as the chunk id), the document foreign key, its ordinal, modality, locator range, text (text chunks only) and the 256-d embedding. Chunks are stored in `dbo.Chunks_EG2_256`. The `EG2_256` suffix names the model and dimension; changing either means a new table and a full re-embed.
+**Domain model.** A `Document` is one uploaded file; it has an integer primary key and a unique `Guid` global id assigned by the server when it is created (a version 7 GUID; the path plays no part in it). A `Document` has many `Chunk`s and many ingest jobs; a chunk has an integer clustered primary key, a unique `Guid` global id (shown to users as the chunk id), the document foreign key, its ordinal, modality, locator range, text (text chunks only) and the 256-d embedding. Chunks are stored in `dbo.Chunks_EG2Q8_256`. The `EG2Q8_256` suffix names the model (EmbeddingGemma 2, q8) and dimension; changing either means a new table and a full re-embed.
 
 **Vector search.** The query is embedded and the `n` nearest documents by cosine distance are fetched from SQL, each represented by its nearest chunk, so one long document cannot fill the results with its own chunks (approximate DiskANN `VECTOR_SEARCH` over-fetches candidate chunks when the index exists and falls back to exact `VECTOR_DISTANCE` when they cover fewer than `n` documents; otherwise exact). Results are hydrated from SQL and keep that order; `score` is `1 - distance`.
 
-**Embeddings.** 256 dimensions (the first 256 of the model's Matryoshka output, re-normalised to unit length). Queries and documents use EmbeddingGemma's asymmetric prompts.
+**Embeddings.** Model id `embeddinggemma-2-q8@256`: the q8 ONNX graphs, 256 dimensions (the first 256 of the model's Matryoshka output, re-normalised to unit length). Queries and documents use EmbeddingGemma's asymmetric prompts.
 
 **Job queue.** `dbo.IngestJobs` holds the queue: one row per job, linked to its document (a document delete cascades to its jobs). A hosted worker claims the oldest claimable job with an atomic `UPDATE ... WITH (UPDLOCK, READPAST)` that also sets a lease; the lease is renewed while the job runs, and an expired lease makes the job claimable again until `MaxAttempts` is reached. At startup (after migrations, before the worker claims anything) jobs left `Processing` by the previous process are requeued. Deleting a document cancels its running job through an in-process registry and waits for the worker to let go before removing anything; a job whose document disappears meanwhile stops quietly.
 
@@ -428,7 +430,7 @@ npm run build          # type-check and build into dist/
 - Tests use **xUnit, FluentAssertions and Moq**. SQL-backed tests (store, pipeline, ingest queue, worker) run against a SQL Server 2025 container started by **Testcontainers** (Docker required; shared via the `SqlServer` collection fixture).
 - To reuse an existing SQL Server instead of starting a container, set `PBRAG_TEST_SQL_CONNECTION_STRING` to its connection string. The tests do not use the Aspire AppHost: they start their own container, so the only local requirement is Docker, as for Aspire.
 - API and MCP tests host the real application in-process with `WebApplicationFactory<Program>` (mocked search service, queue and store, no worker, no SQL, no model).
-- Embedding-dependent tests use a deterministic mock embedding service. **Golden tests** that compare against the real ONNX model run only when `PBRAG_MODEL_PATH` points at a local model; otherwise they are skipped. Reference vectors are generated with the transformers.js scripts in [`tools/golden`](tools/golden).
+- Embedding-dependent tests use a deterministic mock embedding service. **Golden tests** that compare against the real ONNX model run only when `PBRAG_MODEL_PATH` points at a local model; otherwise they are skipped. Reference vectors are generated with the transformers.js scripts in [`tools/golden`](tools/golden), against the same q8 graphs.
 - CI (`.github/workflows`) runs on .NET 10 and Node 22. Pull requests lint, test and build the UI, build and test the .NET solution, build the container image without pushing it and, when they change `Pixelbadger.Toolkit.Rag/`, require `<Version>` to be higher than the latest `v*` git tag. A merge to `master` builds, tests and pushes the image to GHCR (tags `<Version>`, `latest`, `sha-<short>`), then creates the `v<Version>` tag; the push is refused if that tag already exists, so bump `<Version>` for every release. The registry login uses the built-in `GITHUB_TOKEN`.
 
 ## Evaluations

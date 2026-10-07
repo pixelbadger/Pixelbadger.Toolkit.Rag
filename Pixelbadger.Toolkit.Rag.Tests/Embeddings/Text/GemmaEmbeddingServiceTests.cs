@@ -103,7 +103,7 @@ public class GemmaEmbeddingServiceTests
         var service = new GemmaEmbeddingService(options, sessions, new FakeVision(), new FakeAudio());
 
         service.Dimensions.Should().Be(256);
-        service.ModelId.Should().Be("embeddinggemma-2@256");
+        service.ModelId.Should().Be("embeddinggemma-2-q8@256");
     }
 
     [Fact]

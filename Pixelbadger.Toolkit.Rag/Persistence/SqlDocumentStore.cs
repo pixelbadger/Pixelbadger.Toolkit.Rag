@@ -42,7 +42,7 @@ public sealed class SqlDocumentStore : IDocumentStore
     /// <summary>Minimum rows required by SQL Server before CREATE VECTOR INDEX succeeds (error 42266 otherwise).</summary>
     public const int MinRowsForVectorIndex = 100;
 
-    public const string VectorIndexName = "VIX_Chunks_EG2_256_Embedding";
+    public const string VectorIndexName = "VIX_Chunks_EG2Q8_256_Embedding";
 
     /// <summary>Index versions from this value upward support INSERT/UPDATE/DELETE and WITH APPROXIMATE.</summary>
     private const int WritableIndexVersion = 3;
@@ -272,7 +272,7 @@ public sealed class SqlDocumentStore : IDocumentStore
     }
 
     /// <summary>Value stored in Chunk.EmbeddingModel (the chunk table is model + dimension specific).</summary>
-    private const string EmbeddingModelId = "embeddinggemma-2@256";
+    private const string EmbeddingModelId = "embeddinggemma-2-q8@256";
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<ChunkRecord>> GetChunksAsync(IReadOnlyCollection<int> chunkIds, CancellationToken cancellationToken = default)

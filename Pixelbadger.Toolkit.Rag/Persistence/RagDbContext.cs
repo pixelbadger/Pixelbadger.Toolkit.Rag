@@ -5,7 +5,7 @@ using Pixelbadger.Toolkit.Rag.Domain;
 namespace Pixelbadger.Toolkit.Rag.Persistence;
 
 /// <summary>
-/// EF Core model for the RAG store: dbo.Documents and dbo.Chunks_EG2_256 (one chunk table per
+/// EF Core model for the RAG store: dbo.Documents and dbo.Chunks_EG2Q8_256 (one chunk table per
 /// embedding model + dimension, so a model upgrade is a side-by-side table).
 /// The vector index is deliberately NOT part of the model/migrations (100-row minimum, preview gating,
 /// DACPAC limits); see <see cref="SqlDocumentStore.EnsureVectorIndexAsync"/>.
@@ -13,7 +13,7 @@ namespace Pixelbadger.Toolkit.Rag.Persistence;
 public sealed class RagDbContext : DbContext
 {
     public const string DocumentsTable = "Documents";
-    public const string ChunksTable = "Chunks_EG2_256";
+    public const string ChunksTable = "Chunks_EG2Q8_256";
     public const string IngestJobsTable = "IngestJobs";
     public const int EmbeddingDimensions = 256;
 

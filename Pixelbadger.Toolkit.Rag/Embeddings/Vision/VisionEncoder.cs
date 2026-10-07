@@ -3,7 +3,7 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 
 namespace Pixelbadger.Toolkit.Rag.Embeddings.Vision;
 
-/// <summary>Runs vision_encoder.onnx (session created lazily by <see cref="OnnxSessionProvider"/>).</summary>
+/// <summary>Runs vision_encoder_quantized.onnx (session created lazily by <see cref="OnnxSessionProvider"/>).</summary>
 public sealed class VisionEncoder : IVisionEncoder
 {
     public const string PixelValuesInput = "pixel_values";

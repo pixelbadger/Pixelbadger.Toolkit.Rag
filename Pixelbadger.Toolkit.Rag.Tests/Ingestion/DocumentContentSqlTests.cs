@@ -108,7 +108,7 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         content.FileName.Should().Be("cat.png");
         (await s.Queue.GetDocumentAsync(created.DocumentId))!.LatestJob!.Status.Should().Be(IngestJobStatus.Succeeded);
         (await JobsWithBytesAsync(s.ConnectionString)).Should().Be(0, "terminal jobs never keep their bytes");
-        (await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(1);
+        (await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(1);
     }
 
     [SkippableFact]
@@ -159,7 +159,7 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         var s = await CreateAsync();
         var created = (await s.Queue.EnqueueNewDocumentsAsync([Upload("a.txt", "original text")], 1000)).Single();
         await RunWorkerAsync(s);
-        var chunksBefore = await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256");
+        var chunksBefore = await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256");
 
         // Larger than the worker's MaxFileSizeBytes, so the ingester rejects it: a Failed job, no retry.
         await s.Queue.EnqueueReingestAsync(created.DocumentId, Upload("b.md", new string('x', MaxFileSize + 1)), 1000);
@@ -170,7 +170,7 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
         document.Path.Should().Be("a.txt");
         (await ContentTextAsync(s.Store, created.DocumentId)).Should().Be("original text");
         (await s.Store.GetContentAsync(created.DocumentId))!.ContentType.Should().Be("text/plain");
-        (await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(chunksBefore);
+        (await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(chunksBefore);
         (await JobsWithBytesAsync(s.ConnectionString)).Should().Be(0, "a failed job's bytes are dropped and never become the source");
     }
 
@@ -198,7 +198,7 @@ public class DocumentContentSqlTests(SqlServerFixture sql) : IDisposable
 
         (await s.Queue.GetDocumentAsync(created.DocumentId))!.LatestJob!.Status.Should().Be(IngestJobStatus.Skipped);
         (await ContentTextAsync(s.Store, created.DocumentId)).Should().Be("  \n \n");
-        (await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0, "source and chunks always describe the same version");
+        (await ScalarAsync<int>(s.ConnectionString, "SELECT COUNT(*) FROM dbo.Chunks_EG2Q8_256")).Should().Be(0, "source and chunks always describe the same version");
     }
 
     [SkippableFact]

@@ -13,7 +13,7 @@ public interface IEmbeddingService
     /// <summary>Output dimensionality (256).</summary>
     int Dimensions { get; }
 
-    /// <summary>Model identifier stored on each chunk, e.g. "embeddinggemma-2@256".</summary>
+    /// <summary>Model identifier stored on each chunk, e.g. "embeddinggemma-2-q8@256".</summary>
     string ModelId { get; }
 
     /// <summary>Embeds a search query using the "task: search result | query: {q}" prompt.</summary>
