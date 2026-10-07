@@ -46,11 +46,10 @@ public sealed class MessageBusStartupService(
         {
             await _bus.Stop();
         }
-        catch (SqlException ex)
+        catch (Exception ex)
         {
-            // Stopping cancels a consumer's in-flight poll, which SqlClient reports as a SqlException ("Operation
-            // cancelled by user") that SlimMessageBus rethrows. Nothing was being processed by that poll.
-            logger.LogDebug(ex, "A message bus poll was cancelled while stopping");
+            // The consumers stop quietly (QuietStopSqlMessageBus); anything else here must not fail the shutdown.
+            logger.LogWarning(ex, "The message bus did not stop cleanly");
         }
     }
 

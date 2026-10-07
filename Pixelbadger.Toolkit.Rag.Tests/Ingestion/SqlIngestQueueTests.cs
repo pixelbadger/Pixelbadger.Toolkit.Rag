@@ -34,7 +34,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql) : IAsyncLifetime
         var cs = await sql.CreateDatabaseAsync();
         var harness = await BusHarness.CreateAsync(cs);
         _harnesses.Add(harness);
-        var queue = new SqlIngestQueue(new SqlStoreOptions { ConnectionString = cs }, new IngestSettings { MaxAttempts = maxAttempts }, harness.Scopes);
+        var queue = new SqlIngestQueue(new SqlStoreOptions { ConnectionString = cs }, harness.Scopes);
         return (queue, cs, harness);
     }
 

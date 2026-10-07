@@ -16,6 +16,6 @@ public static class TestIngestQueue
     public static async Task<SqlIngestQueue> CreateAsync(string connectionString)
     {
         var bus = await Buses.GetOrAdd(connectionString, cs => new Lazy<Task<BusHarness>>(() => BusHarness.CreateAsync(cs))).Value;
-        return new SqlIngestQueue(new SqlStoreOptions { ConnectionString = connectionString }, new IngestSettings(), bus.Scopes);
+        return new SqlIngestQueue(new SqlStoreOptions { ConnectionString = connectionString }, bus.Scopes);
     }
 }

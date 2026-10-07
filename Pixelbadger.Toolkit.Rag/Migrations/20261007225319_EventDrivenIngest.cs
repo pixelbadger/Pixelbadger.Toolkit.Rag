@@ -11,6 +11,16 @@ namespace Pixelbadger.Toolkit.Rag.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // Reads (document view, job list) run while bus-driven ingest writes the same rows; under locking read
+            // committed a read can be chosen as a deadlock victim. Row versioning is Azure SQL's default; turn it on
+            // for SQL Server too. ALTER DATABASE cannot run in a transaction, and only when it is off (no-op on Azure).
+            migrationBuilder.Sql(
+                """
+                IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id = DB_ID() AND is_read_committed_snapshot_on = 0)
+                    EXEC (N'ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON WITH ROLLBACK IMMEDIATE');
+                """,
+                suppressTransaction: true);
+
             // Event-driven ingest has no pickup of jobs left over from the polling worker, and an in-flight job would
             // never get its event. This project is undeployed, so pre-upgrade in-flight jobs are simply deleted
             // (Status: 0 Queued, 1 Processing; IndexStatus: 0 Queued, 1 Processing, 2 Indexed).
