@@ -1,3 +1,4 @@
+using System.Text;
 using FluentAssertions;
 using Pixelbadger.Toolkit.Rag.Components;
 using Pixelbadger.Toolkit.Rag.Domain;
@@ -217,6 +218,99 @@ public abstract class PipelineBehaviorTests : IDisposable
         await act.Should().ThrowAsync<DocumentNotFoundException>().Where(e => e.DocumentId == unknown);
         (await h.Search.SearchAsync("ghost", 5)).Should().BeEmpty();
         Directory.Exists(h.IndexPath).Should().BeFalse("nothing reached Lucene");
+    }
+
+    // ---- canonical source content ----
+
+    [SkippableFact]
+    public async Task SourceContent_NewDocumentHasNone_UntilItsFirstSuccessfulIngest()
+    {
+        using var h = await NewHarnessAsync();
+        var documentId = await h.NewDocumentAsync("fresh.txt");
+
+        (await h.Store.GetContentAsync(documentId)).Should().BeNull();
+        (await h.Store.GetContentAsync(Guid.NewGuid())).Should().BeNull("unknown document");
+
+        await h.Ingester.IngestAsync(new IngestSource(h.Write("fresh.txt", "hello"), "fresh.txt", documentId));
+
+        (await h.Store.GetContentAsync(documentId)).Should().NotBeNull();
+    }
+
+    [SkippableFact]
+    public async Task SourceContent_SuccessfulIngest_StoresTheExactBytes_MediaTypeAndLogicalFileName()
+    {
+        using var h = await NewHarnessAsync();
+        byte[] png = [0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0x0D, 0x0A, 0x1A];
+        var text = h.Write("docs/guide.md", "# Guide\r\n\r\nUmlaut ü and crlf line endings.");
+        var image = h.WriteBytes("img/cat.PNG", png);
+
+        var textResult = await h.IngestAsync(text);
+        var imageResult = await h.IngestAsync(image);
+
+        var textContent = (await h.Store.GetContentAsync(textResult.DocumentId))!;
+        textContent.Bytes.Should().Equal(await File.ReadAllBytesAsync(text));
+        textContent.ContentType.Should().Be("text/markdown");
+        textContent.FileName.Should().Be("guide.md", "the last segment of the logical path");
+        var imageContent = (await h.Store.GetContentAsync(imageResult.DocumentId))!;
+        imageContent.Bytes.Should().Equal(png);
+        imageContent.ContentType.Should().Be("image/png");
+        imageContent.FileName.Should().Be("cat.PNG");
+    }
+
+    [SkippableFact]
+    public async Task SourceContent_SuccessfulReingest_ReplacesTheSource()
+    {
+        using var h = await NewHarnessAsync();
+        var path = h.Write("doc.txt", "version one");
+        var first = await h.IngestAsync(path);
+
+        File.WriteAllText(path, "version two");
+        await h.IngestAsync(path, documentId: first.DocumentId);
+
+        var content = (await h.Store.GetContentAsync(first.DocumentId))!;
+        Encoding.UTF8.GetString(content.Bytes).Should().Be("version two");
+    }
+
+    [SkippableFact]
+    public async Task SourceContent_FailedReingest_LeavesTheOldSourceAndChunksUntouched()
+    {
+        using var h = await NewHarnessAsync();
+        var path = h.Write("doc.txt", "short original text");
+        var first = await h.IngestAsync(path);
+
+        File.WriteAllText(path, "this replacement is far too large for the limit");
+        var act = async () => await h.IngestAsync(path, new IngestOptions { MaxFileSizeBytes = 25 }, first.DocumentId);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        Encoding.UTF8.GetString((await h.Store.GetContentAsync(first.DocumentId))!.Bytes).Should().Be("short original text");
+        (await h.Search.SearchAsync("original", 5)).Should().ContainSingle().Which.Content.Should().Be("short original text");
+    }
+
+    [SkippableFact]
+    public async Task SourceContent_IngestThatYieldsNoChunks_StillPromotesTheSource_SoSourceAndIndexAgree()
+    {
+        using var h = await NewHarnessAsync();
+        var path = h.Write("doc.txt", "searchable words");
+        var first = await h.IngestAsync(path);
+
+        File.WriteAllText(path, "   \n\n  ");
+        var result = await h.IngestAsync(path, documentId: first.DocumentId);
+
+        result.ChunkCount.Should().Be(0);
+        Encoding.UTF8.GetString((await h.Store.GetContentAsync(first.DocumentId))!.Bytes).Should().Be("   \n\n  ");
+        (await h.Search.SearchAsync("searchable", 5)).Should().BeEmpty("the previous version's chunks were replaced too");
+    }
+
+    [SkippableFact]
+    public async Task SourceContent_IsRemovedWithItsDocument()
+    {
+        using var h = await NewHarnessAsync();
+        var result = await h.IngestAsync(h.Write("gone.txt", "bye"));
+        (await h.Store.GetContentAsync(result.DocumentId)).Should().NotBeNull();
+
+        await h.NewDocumentService().DeleteAsync(result.DocumentId);
+
+        (await h.Store.GetContentAsync(result.DocumentId)).Should().BeNull();
     }
 
     // ---- delete ----

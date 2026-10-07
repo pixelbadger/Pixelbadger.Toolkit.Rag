@@ -17,17 +17,30 @@ public sealed class Document
     /// </summary>
     public Guid GlobalId { get; set; }
 
-    /// <summary>Logical path of the latest upload (metadata only).</summary>
+    /// <summary>
+    /// Logical path (metadata only) of the latest upload for a new document; afterwards the path of the latest
+    /// SUCCESSFULLY indexed version (a pending re-ingest does not change it until it succeeds).
+    /// </summary>
     public string SourcePath { get; set; } = string.Empty;
 
     /// <summary>Optional title (file name today). Used in the embedding document prompt.</summary>
     public string? Title { get; set; }
 
-    /// <summary>Modality of the latest upload.</summary>
+    /// <summary>Modality of the indexed version (see <see cref="SourcePath"/>).</summary>
     public Modality Modality { get; set; }
 
     /// <summary>Lower-case hex SHA-256 of the indexed file bytes; empty until the first ingest completes.</summary>
     public string ContentHash { get; set; } = string.Empty;
+
+    /// <summary>
+    /// The canonical source file: the bytes of the latest successfully indexed version, written in the same
+    /// transaction as its chunks. Null until the first successful ingest (and for documents that predate the column).
+    /// Never loaded by queries that do not serve it.
+    /// </summary>
+    public byte[]? SourceContent { get; set; }
+
+    /// <summary>Media type of <see cref="SourceContent"/>; set and cleared together with it.</summary>
+    public string? ContentType { get; set; }
 
     /// <summary>Kept in step with the document's latest ingest job.</summary>
     public IndexStatus IndexStatus { get; set; }

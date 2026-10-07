@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Net.Http.Headers;
 using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Api;
 
@@ -27,6 +29,11 @@ public static class DocumentEndpoints
         routes.MapGet("/api/documents/{documentId:guid}", GetAsync)
             .WithName("GetDocument")
             .Produces<DocumentDto>()
+            .ProducesProblem(StatusCodes.Status404NotFound);
+
+        routes.MapGet("/api/documents/{documentId:guid}/content", GetContentAsync)
+            .WithName("GetDocumentContent")
+            .Produces(StatusCodes.Status200OK, contentType: "application/octet-stream")
             .ProducesProblem(StatusCodes.Status404NotFound);
 
         // POST, not PUT: it queues a job (or replaces a queued one) rather than being an idempotent replace.
@@ -83,6 +90,38 @@ public static class DocumentEndpoints
     {
         var document = await queue.GetDocumentAsync(documentId, cancellationToken);
         return document is null ? NotFound(documentId) : Results.Ok(document);
+    }
+
+    /// <summary>
+    /// The canonical source of the document's latest successfully indexed version, straight from SQL (never from a
+    /// path on disk). Inline by default so browsers display it; <c>?download=true</c> asks for an attachment.
+    /// </summary>
+    private static async Task<IResult> GetContentAsync(
+        Guid documentId,
+        bool? download,
+        HttpResponse response,
+        IDocumentStore store,
+        CancellationToken cancellationToken)
+    {
+        var content = await store.GetContentAsync(documentId, cancellationToken);
+        if (content is null)
+        {
+            return Results.Problem(
+                $"Document '{documentId}' was not found or has no indexed source content yet.",
+                statusCode: StatusCodes.Status404NotFound);
+        }
+
+        // Uploaded bytes are served from the app's own origin: never let a browser second-guess the media type.
+        response.Headers.XContentTypeOptions = "nosniff";
+
+        if (download == true)
+            return Results.File(content.Bytes, content.ContentType, content.FileName, enableRangeProcessing: true);
+
+        // Results.File only produces attachments; the header value class handles quoting and non-ASCII names.
+        var disposition = new ContentDispositionHeaderValue("inline");
+        disposition.SetHttpFileName(content.FileName);
+        response.Headers.ContentDisposition = disposition.ToString();
+        return Results.File(content.Bytes, content.ContentType, enableRangeProcessing: true);
     }
 
     private static async Task<IResult> ReingestAsync(

@@ -46,6 +46,9 @@ public sealed class RagDbContext : DbContext
             e.Property(d => d.Title).HasColumnType("nvarchar(1000)");
             e.Property(d => d.Modality).HasConversion<byte>().HasColumnType("tinyint");
             e.Property(d => d.ContentHash).HasColumnType("char(64)").IsRequired();
+            // Nullable: only set once an ingest has succeeded. Select it explicitly (projection), never via the entity.
+            e.Property(d => d.SourceContent).HasColumnType("varbinary(max)");
+            e.Property(d => d.ContentType).HasColumnType("nvarchar(255)");
             e.Property(d => d.IndexStatus).HasConversion<byte>().HasColumnType("tinyint");
             e.Property(d => d.UpdatedAtUtc).HasColumnType("datetime2");
         });

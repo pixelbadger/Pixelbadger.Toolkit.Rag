@@ -324,8 +324,8 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         result.JobId.Should().NotBeNull().And.NotBe(created.JobId);
         var document = (await queue.GetDocumentAsync(created.DocumentId))!;
         document.IndexStatus.Should().Be(IndexStatus.Queued);
-        document.Path.Should().Be("docs/v2.txt");
-        document.Title.Should().Be("v2.txt");
+        document.Path.Should().Be("docs/v1.md", "path, title and modality follow the indexed version until the new job succeeds");
+        document.Title.Should().Be("v1.md");
         document.LatestJob!.JobId.Should().Be(result.JobId!.Value);
         document.LatestJob.Status.Should().Be(IngestJobStatus.Queued);
         (await ScalarAsync<int>(cs, $"SELECT COUNT(*) FROM dbo.IngestJobs WHERE DocumentId = (SELECT DocumentId FROM dbo.Documents WHERE GlobalId = '{created.DocumentId}')")).Should().Be(2);
@@ -346,7 +346,7 @@ public class SqlIngestQueueTests(SqlServerFixture sql)
         (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.IngestJobs")).Should().Be(1, "no second job");
         (await ReadContentAsync(queue, created.JobId)).Should().Be("new bytes!");
         var document = (await queue.GetDocumentAsync(created.DocumentId))!;
-        document.Path.Should().Be("b.txt");
+        document.Path.Should().Be("a.md");
         document.Modality.Should().Be(Modality.Text);
         document.IndexStatus.Should().Be(IndexStatus.Queued);
         (await queue.TryClaimNextAsync("w", Lease)).Should().Be(new IngestJobClaim(created.JobId, created.DocumentId, 1, 200, "b.txt", 10));
