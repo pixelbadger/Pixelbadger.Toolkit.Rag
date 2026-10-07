@@ -84,9 +84,7 @@ describe("query page", () => {
     expect(screen.getByText("docs/mars.md")).toBeInTheDocument();
     expect(screen.getByText("Text")).toBeInTheDocument();
     expect(screen.getByText("characters 10–40")).toBeInTheDocument();
-    expect(screen.getByText("0.0328")).toBeInTheDocument();
-    expect(screen.getByText("#1")).toBeInTheDocument();
-    expect(screen.getByText("#3")).toBeInTheDocument();
+    expect(screen.getByText("0.8123")).toBeInTheDocument();
     expect(screen.getByText(/^2 \(/)).toBeInTheDocument();
     expect(screen.getByTitle(DOC_ID)).toBeInTheDocument();
 
@@ -102,12 +100,12 @@ describe("query page", () => {
     expect(screen.queryByText(/answer/i)).not.toBeInTheDocument();
   });
 
-  it("shows a dash for ranks the chunk was absent from", async () => {
-    mockQuery([result({ keywordRank: null, vectorRank: 2 })]);
+  it("shows the cosine similarity score", async () => {
+    mockQuery([result({ score: 0.81234 })]);
     renderApp("/query");
     await search();
-    await screen.findByText("#2");
-    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(await screen.findByText("Similarity")).toBeInTheDocument();
+    expect(screen.getByText("0.8123")).toBeInTheDocument();
   });
 
   it("converts audio locators from milliseconds to seconds", async () => {

@@ -39,7 +39,7 @@ public class McpHttpTransportTests
     }
 
     [Fact]
-    public async Task ToolsCall_Search_RunsHybridSearchAndFormatsUntrustedContent()
+    public async Task ToolsCall_Search_RunsVectorSearchAndFormatsUntrustedContent()
     {
         using var factory = new RagWebApplicationFactory();
         factory.Search

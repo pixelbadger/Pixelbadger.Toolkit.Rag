@@ -73,16 +73,8 @@ export function SearchResultCard({ result }: { result: SearchResult }) {
 
         <dl className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-3 text-xs text-muted-foreground">
           <div className="flex gap-1">
-            <dt>Score</dt>
+            <dt title="Cosine similarity (1 - cosine distance); higher is more similar">Similarity</dt>
             <dd className="font-mono">{result.score.toFixed(4)}</dd>
-          </div>
-          <div className="flex gap-1">
-            <dt>BM25</dt>
-            <dd className="font-mono">{result.keywordRank === null ? "—" : `#${result.keywordRank}`}</dd>
-          </div>
-          <div className="flex gap-1">
-            <dt>Vector</dt>
-            <dd className="font-mono">{result.vectorRank === null ? "—" : `#${result.vectorRank}`}</dd>
           </div>
           <div className="flex gap-1">
             <dt>Chunk</dt>

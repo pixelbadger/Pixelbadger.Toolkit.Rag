@@ -42,7 +42,7 @@ export function jobsResponse(jobs: JobListItem[], overrides: Partial<JobsRespons
 
 export function result(overrides: Partial<SearchResult> = {}): SearchResult {
   return {
-    score: 0.0328,
+    score: 0.8123,
     chunkId: "019a9999-0000-7000-8000-00000000abcd",
     documentId: DOC_ID,
     sourcePath: "docs/mars.md",
@@ -52,8 +52,6 @@ export function result(overrides: Partial<SearchResult> = {}): SearchResult {
     locatorStart: 10,
     locatorEnd: 40,
     content: "Mars is red.",
-    keywordRank: 1,
-    vectorRank: 3,
     ...overrides,
   };
 }

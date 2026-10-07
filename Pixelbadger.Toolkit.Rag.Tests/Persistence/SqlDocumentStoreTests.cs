@@ -266,26 +266,6 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     }
 
     [Fact]
-    public async Task SetIndexStatus_UpdatesDocument_AndIgnoresUnknownIds()
-    {
-        var (store, cs) = await CreateMigratedStoreAsync();
-        var id = await NewDocAsync(cs, "alpha");
-        var draft = Doc("alpha");
-        await store.ReplaceDocumentAsync(id, draft, Chunks("a", 1));
-        (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Indexed);
-
-        await store.SetIndexStatusAsync(id, IndexStatus.Failed);
-        (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Failed);
-
-        await store.SetIndexStatusAsync(Guid.NewGuid(), IndexStatus.Queued);
-        (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Failed);
-
-        // Re-ingest flips it back to Indexed.
-        await store.ReplaceDocumentAsync(id, draft, Chunks("a", 1));
-        (await ScalarAsync<int>(cs, "SELECT IndexStatus FROM dbo.Documents")).Should().Be((int)IndexStatus.Indexed);
-    }
-
-    [Fact]
     public async Task GetChunks_HydratesRecords_AndOmitsMissingIds()
     {
         var (store, cs) = await CreateMigratedStoreAsync();

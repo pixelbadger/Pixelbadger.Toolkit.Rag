@@ -36,7 +36,7 @@ export function QueryPage() {
 
   return (
     <>
-      <PageHeader title="Query" subtitle="Hybrid (BM25 + vector) retrieval over indexed documents" />
+      <PageHeader title="Query" subtitle="Vector retrieval over indexed documents" />
 
       <form onSubmit={submit} className="max-w-3xl space-y-4">
         <div className="space-y-1.5">

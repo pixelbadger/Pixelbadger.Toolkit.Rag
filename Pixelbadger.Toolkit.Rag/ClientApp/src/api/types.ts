@@ -68,6 +68,7 @@ export interface QueryRequest {
 }
 
 export interface SearchResult {
+  /** Cosine similarity (1 - cosine distance); higher is more similar. */
   score: number;
   chunkId: string;
   documentId: string;
@@ -79,8 +80,6 @@ export interface SearchResult {
   locatorStart: number | null;
   locatorEnd: number | null;
   content: string | null;
-  keywordRank: number | null;
-  vectorRank: number | null;
 }
 
 export interface QueryResponse {

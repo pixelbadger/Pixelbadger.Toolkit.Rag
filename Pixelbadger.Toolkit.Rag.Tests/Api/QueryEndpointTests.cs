@@ -15,9 +15,9 @@ public class QueryEndpointTests
 
     private static SearchResult Hit() => new()
     {
-        Score = 0.0328f, ChunkId = Guid.Parse("11111111-1111-1111-1111-111111111111"), DocumentId = Guid.Parse("22222222-2222-2222-2222-222222222222"),
+        Score = 0.8123f, ChunkId = Guid.Parse("11111111-1111-1111-1111-111111111111"), DocumentId = Guid.Parse("22222222-2222-2222-2222-222222222222"),
         SourcePath = "docs/mars.md", SourceFile = "mars.md", Ordinal = 2, Modality = Modality.Text,
-        LocatorStart = 10, LocatorEnd = 40, Content = "Mars is red.", KeywordRank = 1, VectorRank = 3
+        LocatorStart = 10, LocatorEnd = 40, Content = "Mars is red."
     };
 
     [Fact]
@@ -40,9 +40,9 @@ public class QueryEndpointTests
         hit.TryGetProperty("sourceId", out _).Should().BeFalse();
         hit.GetProperty("chunkId").GetGuid().Should().Be(Guid.Parse("11111111-1111-1111-1111-111111111111"));
         hit.GetProperty("sourcePath").GetString().Should().Be("docs/mars.md");
-        hit.GetProperty("keywordRank").GetInt32().Should().Be(1);
-        hit.GetProperty("vectorRank").GetInt32().Should().Be(3);
-        hit.GetProperty("score").GetSingle().Should().BeApproximately(0.0328f, 1e-6f);
+        hit.TryGetProperty("keywordRank", out _).Should().BeFalse();
+        hit.TryGetProperty("vectorRank", out _).Should().BeFalse();
+        hit.GetProperty("score").GetSingle().Should().BeApproximately(0.8123f, 1e-6f);
         factory.Search.VerifyAll();
     }
 

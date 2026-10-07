@@ -442,8 +442,8 @@ public sealed class SqlIngestQueue : IIngestQueue
     public async Task<int> ResetInFlightJobsAsync(CancellationToken cancellationToken = default)
     {
         // Single-process assumption: this instance is the only worker, so anything still Processing belonged to a
-        // previous process that died. If the app is ever scaled out (shared Lucene index / multiple workers), remove
-        // this and rely on lease expiry in TryClaimNextAsync instead.
+        // previous process that died. If the app is ever scaled out (multiple workers, so the in-process job registry
+        // no longer sees every job), remove this and rely on lease expiry in TryClaimNextAsync instead.
         const string sql = $"""
             SET NOCOUNT ON;
             SET XACT_ABORT ON;
