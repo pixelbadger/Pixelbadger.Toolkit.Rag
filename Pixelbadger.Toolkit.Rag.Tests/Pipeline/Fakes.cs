@@ -99,19 +99,6 @@ public sealed class InMemoryDocumentStore : IDocumentStore
         }
     }
 
-    public Task SetIndexStatusAsync(Guid documentId, IndexStatus status, CancellationToken cancellationToken = default)
-    {
-        lock (_gate)
-        {
-            if (_documents.TryGetValue(documentId, out var d))
-            {
-                _documents[documentId] = (d.Id, d.Draft, status);
-            }
-        }
-
-        return Task.CompletedTask;
-    }
-
     public Task<IReadOnlyList<VectorHit>> SearchAsync(float[] queryEmbedding, int maxResults, IReadOnlyCollection<Guid>? documentIds, CancellationToken cancellationToken = default)
     {
         lock (_gate)
@@ -179,56 +166,12 @@ public sealed class FakeAudioPreprocessor : IAudioPreprocessor
     }
 }
 
-/// <summary>Lucene repository whose writes always fail, to exercise IndexStatus.Failed.</summary>
-public sealed class FailingLuceneRepository : ILuceneRepository
-{
-    public Task ReplaceDocumentAsync(string indexPath, Guid documentId, IReadOnlyList<LuceneChunk> chunks, CancellationToken cancellationToken = default)
-        => throw new IOException("simulated Lucene failure");
-
-    public Task DeleteDocumentAsync(string indexPath, Guid documentId, CancellationToken cancellationToken = default)
-        => Task.CompletedTask;
-
-    public Task<IReadOnlyList<KeywordHit>> SearchAsync(string indexPath, string queryText, int maxResults, IReadOnlyCollection<Guid>? documentIds, CancellationToken cancellationToken = default)
-        => Task.FromResult<IReadOnlyList<KeywordHit>>(Array.Empty<KeywordHit>());
-}
-
-/// <summary>
-/// Wraps a Lucene repository and pauses inside <see cref="ReplaceDocumentAsync"/> (after the SQL write, before the
-/// Lucene write) until released, so a test can land a delete in exactly that window.
-/// </summary>
-public sealed class PausingLuceneRepository(ILuceneRepository inner) : ILuceneRepository
-{
-    private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    public Task Entered => _entered.Task;
-
-    public void Release() => _release.TrySetResult();
-
-    public async Task ReplaceDocumentAsync(string indexPath, Guid documentId, IReadOnlyList<LuceneChunk> chunks, CancellationToken cancellationToken = default)
-    {
-        _entered.TrySetResult();
-        await _release.Task;
-        await inner.ReplaceDocumentAsync(indexPath, documentId, chunks, cancellationToken);
-    }
-
-    public Task DeleteDocumentAsync(string indexPath, Guid documentId, CancellationToken cancellationToken = default)
-        => inner.DeleteDocumentAsync(indexPath, documentId, cancellationToken);
-
-    public Task<IReadOnlyList<KeywordHit>> SearchAsync(string indexPath, string queryText, int maxResults, IReadOnlyCollection<Guid>? documentIds, CancellationToken cancellationToken = default)
-        => inner.SearchAsync(indexPath, queryText, maxResults, documentIds, cancellationToken);
-}
-
 /// <summary>Builds the full pipeline graph over a temp directory and a given store.</summary>
 public sealed class PipelineHarness : IDisposable
 {
     public string Root { get; } = Path.Combine(Path.GetTempPath(), "pbrag_pipeline_" + Guid.NewGuid().ToString("N"));
     public string ContentDir => Path.Combine(Root, "content");
-    public string IndexPath => Path.Combine(Root, "index");
-    public RagOptions Options { get; }
     public IDocumentStore Store { get; }
-    public ILuceneRepository Lucene { get; }
-    public IndexWriteGate Gate { get; } = new();
     public ContentIngester Ingester { get; }
     public SearchService Search { get; }
     public FakeAudioPreprocessor Audio { get; } = new();
@@ -239,17 +182,14 @@ public sealed class PipelineHarness : IDisposable
     /// Creates the (Queued) document row an ingest writes into, from a logical path, as the upload endpoint does.
     /// Defaults to the in-memory store's own.
     /// </param>
-    public PipelineHarness(IDocumentStore? store = null, ILuceneRepository? lucene = null, Func<string, Task<Guid>>? createDocument = null)
+    public PipelineHarness(IDocumentStore? store = null, Func<string, Task<Guid>>? createDocument = null)
     {
         Directory.CreateDirectory(ContentDir);
-        Options = new RagOptions { IndexPath = IndexPath };
         Store = store ?? new InMemoryDocumentStore();
         _createDocument = createDocument
             ?? (Store is InMemoryDocumentStore memory
                 ? path => Task.FromResult(memory.CreateDocument(path))
                 : throw new ArgumentException("A document factory is required for a store other than InMemoryDocumentStore.", nameof(createDocument)));
-        lucene ??= new LuceneRepository();
-        Lucene = lucene;
         var embeddings = new Support.MockEmbeddingService();
 
         var chunkers = new ITextChunker[] { new MarkdownTextChunker(), new ParagraphTextChunker() };
@@ -260,18 +200,18 @@ public sealed class PipelineHarness : IDisposable
         };
 
         Ingester = new ContentIngester(
-            Options, Store, lucene, Gate, embeddings,
+            Store, embeddings,
             new ChunkerFactory(chunkers), new Components.FileReaders.FileReaderFactory(readers),
             new FakeImagePreprocessor(), Audio, NullLogger<ContentIngester>.Instance);
-        Search = new SearchService(Options, lucene, Store, embeddings, new RrfReranker());
+        Search = new SearchService(Store, embeddings);
     }
 
     /// <summary>The logical path of a file under <see cref="ContentDir"/>: its relative path with '/' separators.</summary>
     public string LogicalPathOf(string localPath) => Path.GetRelativePath(ContentDir, localPath).Replace('\\', '/');
 
-    /// <summary>A <see cref="DocumentService"/> over this harness's store, Lucene index and gate.</summary>
+    /// <summary>A <see cref="DocumentService"/> over this harness's store.</summary>
     public DocumentService NewDocumentService() => new(
-        Options, new IngestSettings(), Store, Lucene, new IngestJobRegistry(), Gate, NullLogger<DocumentService>.Instance);
+        new IngestSettings(), Store, new IngestJobRegistry(), NullLogger<DocumentService>.Instance);
 
     /// <summary>Creates a new document for a logical path (what a document upload does before its job runs).</summary>
     public Task<Guid> NewDocumentAsync(string logicalPath) => _createDocument(LogicalPath.Normalize(logicalPath));

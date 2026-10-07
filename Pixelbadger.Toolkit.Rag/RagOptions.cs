@@ -10,9 +10,6 @@ namespace Pixelbadger.Toolkit.Rag;
 /// </summary>
 public sealed class RagOptions
 {
-    /// <summary>Lucene BM25 index directory (owned by a single instance).</summary>
-    public string IndexPath { get; set; } = string.Empty;
-
     public SqlStoreOptions Sql { get; set; } = new();
 
     public EmbeddingModelOptions Model { get; set; } = new();

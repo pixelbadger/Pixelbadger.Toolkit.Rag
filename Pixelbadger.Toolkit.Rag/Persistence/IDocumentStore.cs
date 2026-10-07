@@ -67,9 +67,6 @@ public interface IDocumentStore
     /// <summary>Deletes the document with its chunks and ingest jobs (cascade). False when it does not exist.</summary>
     Task<bool> DeleteDocumentAsync(Guid documentId, CancellationToken cancellationToken = default);
 
-    /// <summary>Sets a document's IndexStatus (e.g. Failed when the Lucene write fails).</summary>
-    Task SetIndexStatusAsync(Guid documentId, IndexStatus status, CancellationToken cancellationToken = default);
-
     /// <summary>
     /// Nearest chunks to <paramref name="queryEmbedding"/> (256-d, unit length), ascending distance.
     /// Optional filter on document ids. Uses approximate VECTOR_SEARCH when the vector

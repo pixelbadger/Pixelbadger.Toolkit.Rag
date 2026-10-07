@@ -9,8 +9,8 @@ using Pixelbadger.Toolkit.Rag.Persistence;
 namespace Pixelbadger.Toolkit.Rag.Ingestion;
 
 /// <summary>
-/// Processes queued ingest jobs, one at a time (one job is one file for one document; Lucene allows a single
-/// writer, and a single instance owns the index directory). Never lets an exception escape the loop: SQL errors are
+/// Processes queued ingest jobs, one at a time (one job is one file for one document; a single instance
+/// owns the queue). Never lets an exception escape the loop: SQL errors are
 /// logged and retried with a growing delay, so a database outage cannot crash the host.
 /// </summary>
 public sealed class IngestWorker(

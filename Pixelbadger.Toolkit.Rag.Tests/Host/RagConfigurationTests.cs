@@ -13,8 +13,6 @@ public class RagConfigurationTests : IDisposable
 
     private string ModelDir => Path.Combine(_root, "model");
 
-    private string IndexDir => Path.Combine(_root, "index");
-
     public void Dispose()
     {
         try { Directory.Delete(_root, true); } catch { /* best effort */ }
@@ -26,7 +24,7 @@ public class RagConfigurationTests : IDisposable
 
     private (string, string?)[] Valid() =>
     [
-        ("Rag:IndexPath", IndexDir), ("Rag:ConnectionString", "Server=x"), ("Rag:ModelPath", ModelDir)
+        ("Rag:ConnectionString", "Server=x"), ("Rag:ModelPath", ModelDir)
     ];
 
     private IConfiguration ConfigWith(params (string Key, string? Value)[] extra) => Config([.. Valid(), .. extra]);
@@ -36,7 +34,6 @@ public class RagConfigurationTests : IDisposable
     {
         var options = RagConfiguration.Bind(Config(Valid()));
 
-        options.IndexPath.Should().Be(IndexDir);
         options.Sql.ConnectionString.Should().Be("Server=x");
         options.Sql.SearchMode.Should().Be(VectorSearchMode.Auto);
         options.Model.ModelPath.Should().Be(ModelDir);
@@ -48,16 +45,6 @@ public class RagConfigurationTests : IDisposable
         options.Ingest.LeaseSeconds.Should().Be(600);
         options.Ingest.PollIntervalSeconds.Should().Be(2);
         options.Ingest.CancelTimeout.Should().Be(TimeSpan.FromSeconds(30));
-    }
-
-    [Fact]
-    public void Bind_CreatesTheIndexDirectory_WhenMissing()
-    {
-        Directory.Exists(IndexDir).Should().BeFalse();
-
-        RagConfiguration.Bind(Config(Valid()));
-
-        Directory.Exists(IndexDir).Should().BeTrue();
     }
 
     [Fact]
@@ -87,12 +74,20 @@ public class RagConfigurationTests : IDisposable
     }
 
     [Fact]
+    public void Bind_IgnoresTheRemovedIndexPathSettings()
+    {
+        var options = RagConfiguration.Bind(ConfigWith(("Rag:IndexPath", "/does/not/exist"), ("PBRAG_INDEX_PATH", "/nor/this")));
+
+        options.Sql.ConnectionString.Should().Be("Server=x");
+        Directory.Exists("/does/not/exist").Should().BeFalse();
+    }
+
+    [Fact]
     public void Bind_FallsBackToPbragEnvironmentVariables()
     {
         var options = RagConfiguration.Bind(Config(
-            ("PBRAG_INDEX_PATH", IndexDir), ("PBRAG_CONNECTION_STRING", "Server=env"), ("PBRAG_MODEL_PATH", ModelDir)));
+            ("PBRAG_CONNECTION_STRING", "Server=env"), ("PBRAG_MODEL_PATH", ModelDir)));
 
-        options.IndexPath.Should().Be(IndexDir);
         options.Sql.ConnectionString.Should().Be("Server=env");
         options.Model.ModelPath.Should().Be(ModelDir);
     }
@@ -109,14 +104,13 @@ public class RagConfigurationTests : IDisposable
     public void Bind_TreatsBlankValuesAsMissing_SoTheFallbackApplies()
     {
         var options = RagConfiguration.Bind(Config(
-            ("Rag:IndexPath", ""), ("Rag:ConnectionString", " "), ("Rag:ModelPath", ""),
-            ("PBRAG_INDEX_PATH", IndexDir), ("PBRAG_CONNECTION_STRING", "Server=env"), ("PBRAG_MODEL_PATH", ModelDir)));
+            ("Rag:ConnectionString", " "), ("Rag:ModelPath", ""),
+            ("PBRAG_CONNECTION_STRING", "Server=env"), ("PBRAG_MODEL_PATH", ModelDir)));
 
         options.Sql.ConnectionString.Should().Be("Server=env");
     }
 
     [Theory]
-    [InlineData("Rag:IndexPath", "Missing index path")]
     [InlineData("Rag:ConnectionString", "Missing SQL Server connection string")]
     [InlineData("Rag:ModelPath", "Missing embedding model path")]
     public void Bind_Throws_WithAHelpfulMessage_WhenARequiredValueIsMissing(string missingKey, string message)

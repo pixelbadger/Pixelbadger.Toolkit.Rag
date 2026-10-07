@@ -16,7 +16,6 @@ public sealed class RagConfigurationException(string message) : Exception(messag
 public static class RagConfiguration
 {
     public const string SectionName = "Rag";
-    public const string IndexPathEnvVar = "PBRAG_INDEX_PATH";
 
     /// <param name="configuration">
     /// Application configuration. Environment variables are part of it, so the <c>PBRAG_*</c> fallbacks are
@@ -26,10 +25,6 @@ public static class RagConfiguration
     public static RagOptions Bind(IConfiguration configuration)
     {
         var section = configuration.GetSection(SectionName);
-
-        var indexPath = FirstNonBlank(section["IndexPath"], configuration[IndexPathEnvVar])
-            ?? throw new RagConfigurationException(
-                $"Missing index path. Set Rag:IndexPath (Rag__IndexPath) or the {IndexPathEnvVar} environment variable.");
 
         var connection = FirstNonBlank(section["ConnectionString"], configuration[SqlStoreOptions.ConnectionStringEnvVar])
             ?? throw new RagConfigurationException(
@@ -59,18 +54,8 @@ public static class RagConfiguration
 
         ValidateIngest(ingest);
 
-        try
-        {
-            Directory.CreateDirectory(indexPath);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            throw new RagConfigurationException($"Index directory '{indexPath}' could not be created: {ex.Message}");
-        }
-
         return new RagOptions
         {
-            IndexPath = indexPath,
             Sql = new SqlStoreOptions
             {
                 ConnectionString = connection,

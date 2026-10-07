@@ -8,7 +8,7 @@ public sealed record QueryRequest(string? Query, int? MaxResults, string[]? Docu
 
 public sealed record QueryResponse(IReadOnlyList<SearchResult> Results);
 
-/// <summary>Hybrid search over REST (the MCP <c>Search</c> tool is the other front door to the same service).</summary>
+/// <summary>Vector search over REST (the MCP <c>Search</c> tool is the other front door to the same service).</summary>
 public static class QueryEndpoints
 {
     public const int DefaultMaxResults = 10;

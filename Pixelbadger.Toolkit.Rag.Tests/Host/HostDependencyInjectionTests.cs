@@ -37,8 +37,6 @@ public class HostDependencyInjectionTests
     [InlineData(typeof(IContentIngester))]
     [InlineData(typeof(IEmbeddingService))]
     [InlineData(typeof(IDocumentStore))]
-    [InlineData(typeof(ILuceneRepository))]
-    [InlineData(typeof(IReranker))]
     [InlineData(typeof(IImagePreprocessor))]
     [InlineData(typeof(IAudioPreprocessor))]
     [InlineData(typeof(IVisionEncoder))]
@@ -52,7 +50,6 @@ public class HostDependencyInjectionTests
     [InlineData(typeof(IngestJobRegistry))]
     [InlineData(typeof(InFlightJobRecovery))]
     [InlineData(typeof(DocumentService))]
-    [InlineData(typeof(IndexWriteGate))]
     [InlineData(typeof(RagOptions))]
     [InlineData(typeof(SqlStoreOptions))]
     [InlineData(typeof(EmbeddingModelOptions))]
@@ -130,7 +127,6 @@ public class HostDependencyInjectionTests
         sp.GetRequiredService<IngestWorkerSignal>().Should().BeSameAs(sp.GetRequiredService<IngestWorkerSignal>());
         sp.GetRequiredService<IngestJobRegistry>().Should().BeSameAs(sp.GetRequiredService<IngestJobRegistry>());
         sp.GetRequiredService<InFlightJobRecovery>().Should().BeSameAs(sp.GetRequiredService<InFlightJobRecovery>());
-        sp.GetRequiredService<IndexWriteGate>().Should().BeSameAs(sp.GetRequiredService<IndexWriteGate>());
         sp.GetRequiredService<DocumentService>().Should().NotBeSameAs(sp.GetRequiredService<DocumentService>());
         sp.GetRequiredService<ISearchService>().Should().NotBeSameAs(sp.GetRequiredService<ISearchService>());
         sp.GetRequiredService<IIngestQueue>().Should().NotBeSameAs(sp.GetRequiredService<IIngestQueue>());

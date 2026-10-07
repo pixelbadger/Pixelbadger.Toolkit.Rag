@@ -238,19 +238,6 @@ public sealed class SqlDocumentStore : IDocumentStore
     private const string EmbeddingModelId = "embeddinggemma-2@256";
 
     /// <inheritdoc />
-    /// <remarks>A no-op when no document has the given id.</remarks>
-    public async Task SetIndexStatusAsync(Guid documentId, IndexStatus status, CancellationToken cancellationToken = default)
-    {
-        await using var db = CreateContext();
-        var updatedAt = DateTime.UtcNow;
-        await db.Documents
-            .Where(d => d.GlobalId == documentId)
-            .ExecuteUpdateAsync(s => s
-                .SetProperty(d => d.IndexStatus, status)
-                .SetProperty(d => d.UpdatedAtUtc, updatedAt), cancellationToken);
-    }
-
-    /// <inheritdoc />
     public async Task<IReadOnlyList<ChunkRecord>> GetChunksAsync(IReadOnlyCollection<int> chunkIds, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(chunkIds);

@@ -6,18 +6,15 @@
     <Nullable>enable</Nullable>
 
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <Version>3.1.0</Version>
+    <Version>4.0.0</Version>
     <Authors>Pixelbadger</Authors>
-    <Description>An ASP.NET Core service for RAG (Retrieval-Augmented Generation) workflows: queued multipart ingest, REST query and an MCP (Streamable HTTP) Search tool over hybrid (Lucene.NET BM25 + SQL Server vector) search of text, image and audio documents embedded locally with EmbeddingGemma 2 (ONNX).</Description>
+    <Description>An ASP.NET Core service for RAG (Retrieval-Augmented Generation) workflows: queued multipart ingest, REST query and an MCP (Streamable HTTP) Search tool over vector search (SQL Server) of text, image and audio documents embedded locally with EmbeddingGemma 2 (ONNX).</Description>
     <RepositoryUrl>https://github.com/pixelbadger/Pixelbadger.Toolkit.Rag</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Aspire.Azure.Storage.Queues" Version="13.6.0" />
-    <PackageReference Include="Lucene.Net" Version="4.8.0-beta00018" />
-    <PackageReference Include="Lucene.Net.Analysis.Common" Version="4.8.0-beta00018" />
-    <PackageReference Include="Lucene.Net.QueryParser" Version="4.8.0-beta00018" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="7.1.1" />
     <!-- Entra ID authentication (Authentication="Active Directory Default", used with Azure SQL); registers itself. -->
     <PackageReference Include="Microsoft.Data.SqlClient.Extensions.Azure" Version="7.1.1" />

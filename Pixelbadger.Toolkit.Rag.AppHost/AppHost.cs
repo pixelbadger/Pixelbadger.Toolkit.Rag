@@ -6,12 +6,11 @@ using Azure.Provisioning.Storage;
 
 // Local run (`dotnet run --project Pixelbadger.Toolkit.Rag.AppHost` / `aspire run`):
 //   SQL Server 2025 in a persistent container, the app as a .NET project (debuggable; ffmpeg on PATH for audio),
-//   the model from a local directory (parameter "model-path") and the Lucene index in the project's ./index.
+//   and the model from a local directory (parameter "model-path").
 // Publish (`azd up` / `aspire deploy`):
 //   Azure SQL Database (Entra ID auth through the app's managed identity) and the Dockerfile image on Azure Container
 //   Apps (Consumption profile, 4 vCPU / 8 GiB, scale to zero, at most one replica), with one Azure Files share at
-//   /data holding the Lucene index (/data/index) and the model (/data/models/embeddinggemma-2-onnx, uploaded once with
-//   scripts/upload-model.sh). A request wakes the app; a storage-queue scale rule keeps it running while the ingest
+//   /data holding the model (/data/models/embeddinggemma-2-onnx, uploaded once with scripts/upload-model.sh). A request wakes the app; a storage-queue scale rule keeps it running while the ingest
 //   worker has work (the worker keeps a marker message in the "ingest-active" queue until the job queue is empty).
 // Must match QueueIngestKeepAlive.ConnectionName in the app (the connection name and the queue name).
 const string IngestActiveQueue = "ingest-active";
@@ -49,9 +48,9 @@ var ingestActive = storage.AddQueue(IngestActiveQueue);
 
 if (builder.ExecutionContext.IsPublishMode)
 {
-    // The Dockerfile image (includes ffmpeg; Rag__IndexPath defaults to /data/index). The /data volume becomes an
-    // Azure Files share. One share holds both the index and the model: with two volumes on one container, Aspire
-    // 13.6 gives both environment storage definitions the same (truncated) name, so they would collide anyway.
+    // The Dockerfile image (includes ffmpeg). The /data volume becomes an Azure Files share holding the model. Keep
+    // it to one volume: with two on one container, Aspire 13.6 gives both environment storage definitions the same
+    // (truncated) name, so they would collide.
     builder.AddDockerfile("rag", "..")
         .WithHttpEndpoint(targetPort: 8080)
         .WithExternalHttpEndpoints()
@@ -60,7 +59,7 @@ if (builder.ExecutionContext.IsPublishMode)
         .WithRagDefaults(db, storage, ingestActive)
         .PublishAsAzureContainerApp((infra, app) =>
         {
-            // One instance owns the Lucene index and the ingest queue: never scale out. Scale to zero when idle:
+            // One instance owns the ingest queue (startup reset, in-process job registry): never scale out. Scale to zero when idle:
             // an HTTP request wakes the app, and the queue rule keeps it up while the worker's marker is there.
             app.Template.Scale.MinReplicas = 0;
             app.Template.Scale.MaxReplicas = 1;
@@ -90,7 +89,7 @@ if (builder.ExecutionContext.IsPublishMode)
             container.Resources.Memory = "8Gi";
 
             // The image runs as the non-root "app" user (uid/gid 1654): own the SMB mount as that user. nobrl keeps
-            // Lucene's lock file on client-side locks (one instance, so nothing else contends for it).
+            // byte-range locks on the client (one instance, so nothing else contends for the files).
             foreach (var volume in app.Template.Volumes)
                 volume.Value!.MountOptions = "uid=1654,gid=1654,dir_mode=0770,file_mode=0660,nobrl";
         });
