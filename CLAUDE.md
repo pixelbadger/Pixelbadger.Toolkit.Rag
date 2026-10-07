@@ -210,7 +210,7 @@ Query -> SearchService -> embed -> IDocumentStore.SearchAsync (n nearest documen
 - Lock order is job row, then document row, everywhere (begin processing, complete, re-ingest, delete): keep it that way to avoid deadlocks. Re-ingest additionally takes a per-document `sp_getapplock`. Its job lookup and begin processing can still deadlock on the jobs table's indexes, so `EnqueueReingestAsync` retries the whole transaction when it is the deadlock victim (SQL error 1205).
 - Stored file bytes are NULLed as soon as a job is terminal (including `Failed`).
 - Changing `BeginProcessingAsync` / `CompleteAsync` SQL: it is raw T-SQL in `SqlIngestQueue`; `SqlIngestQueueTests` and the `Messaging/` SQL tests cover it and need Docker.
-- Bus tables (`BusMessages*`, `BusOutbox*`; names in `Messaging/JobEvents.cs`) are created by SlimMessageBus in the app database on first start. `DeliveredMessageCleanup` purges delivered transport messages older than a day, from `VectorIndexService` when the queue is idle.
+- Bus tables (`BusMessages*`, `BusOutbox*`; names in `Messaging/JobEvents.cs`) are created by SlimMessageBus in the app database when the bus is first built (its first start or first publish). `DeliveredMessageCleanup` purges delivered transport messages older than a day, from `VectorIndexService` when the queue is idle.
 
 ### MCP
 
@@ -409,7 +409,7 @@ The chunk table name (`Chunks_EG2Q8_256`) and `EmbeddingModelOptions.ModelId` en
 
 **Upgrading from 4.x**: 5.0 switches to the q8 graphs and its `QuantizedEmbeddingsQ8` migration deletes ALL documents, chunks and job history (no conversion; fp32 vectors are incompatible). Download the q8 files (for Azure re-run `scripts/upload-model.sh` / `azd up` postprovision), then re-upload content.
 
-**Upgrading from 5.x**: 6.0 is event-driven (SlimMessageBus). The `EventDrivenIngest` migration deletes jobs that were `Queued` or `Processing` (their events were never published) and documents that were never indexed; other documents are kept and marked `Indexed`. Re-upload the files that were in flight. It also turns on READ_COMMITTED_SNAPSHOT where it is off, drops the lease columns, and SlimMessageBus creates its `BusMessages*` / `BusOutbox*` tables on first start.
+**Upgrading from 5.x**: 6.0 is event-driven (SlimMessageBus). The `EventDrivenIngest` migration deletes jobs that were `Queued` or `Processing` (their events were never published) and documents that were never indexed; other documents are kept and marked `Indexed`. Re-upload the files that were in flight. It also turns on READ_COMMITTED_SNAPSHOT where it is off, drops the lease columns, and SlimMessageBus creates its `BusMessages*` / `BusOutbox*` tables when the bus is first used.
 
 **Vector index problems on local SQL Server**: the DiskANN index is a preview on SQL Server 2025; set `Rag:ExactVectorSearch=true`.
 
