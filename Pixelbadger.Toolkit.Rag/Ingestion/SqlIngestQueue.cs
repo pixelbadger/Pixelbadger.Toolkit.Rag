@@ -14,8 +14,9 @@ namespace Pixelbadger.Toolkit.Rag.Ingestion;
 /// </summary>
 /// <remarks>
 /// Lock order everywhere is job row first, then document row (complete, fail, reset, re-ingest, and the document
-/// delete in <see cref="SqlDocumentStore"/>; the claim touches the two in separate statements), so none of them can
-/// deadlock with another.
+/// delete in <see cref="SqlDocumentStore"/>; the claim touches the two in separate statements). Within the jobs table,
+/// though, the re-ingest lookup (via the DocumentId index) and the claim (via the Status index) can still take index
+/// locks in opposite orders and deadlock; the re-ingest transaction is therefore retried when it is the victim.
 /// </remarks>
 public sealed class SqlIngestQueue : IIngestQueue
 {
@@ -100,25 +101,37 @@ public sealed class SqlIngestQueue : IIngestQueue
         var modality = MediaTypes.GetModality(upload.LogicalPath)
             ?? throw new NotSupportedException($"Unsupported file type: {Path.GetExtension(upload.LogicalPath)}");
 
-        await using var connection = new SqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        for (var attempt = 1; ; attempt++)
+        {
+            await using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        try
-        {
-            var result = await ReingestCoreAsync(connection, transaction, documentId, upload.LogicalPath, modality, content, maxChunkCharacters, cancellationToken);
-            if (result.Outcome is ReingestOutcome.Created or ReingestOutcome.ReplacedQueued)
-                await transaction.CommitAsync(cancellationToken);
-            else
-                await transaction.RollbackAsync(cancellationToken);
-            return result;
-        }
-        catch (SqlException ex) when (ex.Number == 547)
-        {
-            // The document was deleted between the lookup and the insert (foreign key violation).
-            return new ReingestResult(ReingestOutcome.NotFound);
+            try
+            {
+                var result = await ReingestCoreAsync(connection, transaction, documentId, upload.LogicalPath, modality, content, maxChunkCharacters, cancellationToken);
+                if (result.Outcome is ReingestOutcome.Created or ReingestOutcome.ReplacedQueued)
+                    await transaction.CommitAsync(cancellationToken);
+                else
+                    await transaction.RollbackAsync(cancellationToken);
+                return result;
+            }
+            catch (SqlException ex) when (ex.Number == 547)
+            {
+                // The document was deleted between the lookup and the insert (foreign key violation).
+                return new ReingestResult(ReingestOutcome.NotFound);
+            }
+            catch (SqlException ex) when (ex.Number == DeadlockVictimError && attempt < MaxDeadlockAttempts)
+            {
+                // Chosen as deadlock victim against a claim (see remarks): SQL Server has rolled the whole transaction
+                // back, so rerunning it is safe and then sees the job's real state (Conflict or ReplacedQueued).
+                await Task.Delay(Random.Shared.Next(20, 100 * attempt), cancellationToken);
+            }
         }
     }
+
+    private const int DeadlockVictimError = 1205;
+    private const int MaxDeadlockAttempts = 5;
 
     private async Task<ReingestResult> ReingestCoreAsync(
         SqlConnection connection,
