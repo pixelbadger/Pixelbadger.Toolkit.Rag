@@ -2,12 +2,21 @@ using Pixelbadger.Toolkit.Rag.Domain;
 
 namespace Pixelbadger.Toolkit.Rag.Persistence;
 
-/// <summary>Document metadata for <see cref="IDocumentStore.ReplaceDocumentAsync"/>.</summary>
+/// <summary>
+/// Document metadata for <see cref="IDocumentStore.ReplaceDocumentAsync"/>. <see cref="SourceContent"/> /
+/// <see cref="ContentType"/> are the bytes of the version being indexed; they become the document's canonical source
+/// in the same transaction as the chunks (null leaves the stored source untouched).
+/// </summary>
 public sealed record DocumentDraft(
     string SourcePath,
     string? Title,
     Modality Modality,
-    string ContentHash);
+    string ContentHash,
+    byte[]? SourceContent = null,
+    string? ContentType = null);
+
+/// <summary>A document's canonical source file; <see cref="FileName"/> is the last segment of its logical path.</summary>
+public sealed record DocumentContent(byte[] Bytes, string ContentType, string FileName);
 
 /// <summary>A chunk to persist. <see cref="Embedding"/> must already be truncated + re-normalised.</summary>
 public sealed record ChunkDraft(
@@ -52,7 +61,8 @@ public interface IDocumentStore
 
     /// <summary>
     /// In one transaction: update the metadata of the EXISTING document <paramref name="documentId"/>, delete its
-    /// existing chunks, insert <paramref name="chunks"/>, set IndexStatus = Indexed. Returns the persisted chunks
+    /// existing chunks, insert <paramref name="chunks"/>, set IndexStatus = Indexed and (when the draft carries it)
+    /// promote the draft's bytes to the document's canonical source, so source and chunks cannot diverge. Returns the persisted chunks
     /// (with ChunkId / ChunkGlobalId populated) in ordinal order.
     /// </summary>
     /// <exception cref="DocumentNotFoundException">
@@ -63,6 +73,12 @@ public interface IDocumentStore
         DocumentDraft document,
         IReadOnlyList<ChunkDraft> chunks,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// The canonical source of the document's latest successfully indexed version, read from SQL only; null when the
+    /// document is unknown or has no source yet.
+    /// </summary>
+    Task<DocumentContent?> GetContentAsync(Guid documentId, CancellationToken cancellationToken = default);
 
     /// <summary>Deletes the document with its chunks and ingest jobs (cascade). False when it does not exist.</summary>
     Task<bool> DeleteDocumentAsync(Guid documentId, CancellationToken cancellationToken = default);

@@ -90,7 +90,10 @@ public class ContentIngester : IContentIngester
             logicalPath,
             fileName,
             modality,
-            await ComputeContentHashAsync(source.LocalPath, cancellationToken));
+            await ComputeContentHashAsync(source.LocalPath, cancellationToken),
+            // Promoted to the document's canonical source together with the chunks (size is capped by ValidateFileForIngestion).
+            await File.ReadAllBytesAsync(source.LocalPath, cancellationToken),
+            MediaTypes.GetContentType(logicalPath));
 
         // Embedding (the slow part) happens outside the gate; only the SQL + Lucene writes are serialised with deletes.
         var chunks = modality switch

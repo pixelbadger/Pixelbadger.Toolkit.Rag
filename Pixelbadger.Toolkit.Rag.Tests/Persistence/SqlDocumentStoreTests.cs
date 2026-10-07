@@ -535,4 +535,57 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
         await fresh.SearchAsync(MockEmbeddingService.Vector("x"), 3, null);
         fresh.LastSearchPath.Should().NotBe(SqlDocumentStore.SearchPath.Exact);
     }
+
+    // ---- canonical source content ----
+
+    [SkippableFact]
+    public async Task Replace_WithSourceContent_PromotesItInTheSameWriteAsTheChunks()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs);
+        byte[] bytes = [0, 1, 2, 0xFF];
+
+        await store.ReplaceDocumentAsync(id, Doc("doc") with { SourceContent = bytes, ContentType = "text/plain" }, Chunks("c", 2));
+
+        var content = (await store.GetContentAsync(id))!;
+        content.Bytes.Should().Equal(bytes);
+        content.ContentType.Should().Be("text/plain");
+        content.FileName.Should().Be("doc.txt");
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(2);
+    }
+
+    [SkippableFact]
+    public async Task Replace_WithoutSourceContent_KeepsTheStoredSource()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs);
+        await store.ReplaceDocumentAsync(id, Doc("doc") with { SourceContent = [1, 2, 3], ContentType = "text/plain" }, Chunks("a", 1));
+
+        await store.ReplaceDocumentAsync(id, Doc("doc"), Chunks("b", 1));
+
+        (await store.GetContentAsync(id))!.Bytes.Should().Equal(1, 2, 3);
+    }
+
+    [SkippableFact]
+    public async Task Replace_OfAMissingDocument_ThrowsAndStoresNothing()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var ghost = Guid.NewGuid();
+
+        var act = async () => await store.ReplaceDocumentAsync(ghost, Doc("ghost") with { SourceContent = [9] }, Chunks("g", 1));
+
+        await act.Should().ThrowAsync<DocumentNotFoundException>();
+        (await store.GetContentAsync(ghost)).Should().BeNull();
+        (await ScalarAsync<int>(cs, "SELECT COUNT(*) FROM dbo.Chunks_EG2_256")).Should().Be(0);
+    }
+
+    [SkippableFact]
+    public async Task GetContent_FallsBackToTheExtensionWhenNoContentTypeIsStored()
+    {
+        var (store, cs) = await CreateMigratedStoreAsync();
+        var id = await NewDocAsync(cs);
+        await store.ReplaceDocumentAsync(id, Doc("doc") with { SourceContent = [1] }, Chunks("a", 1));
+
+        (await store.GetContentAsync(id))!.ContentType.Should().Be("text/plain");
+    }
 }

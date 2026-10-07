@@ -222,12 +222,10 @@ public sealed class SqlIngestQueue : IIngestQueue
         }
 
         await using (var touch = new SqlCommand(
-            $"UPDATE {DocumentsTableSql} SET SourcePath = @p, Title = @t, Modality = @mod, IndexStatus = @status, UpdatedAtUtc = @now WHERE DocumentId = @d",
+            // Path, title, modality and the canonical source stay those of the indexed version until the job succeeds.
+            $"UPDATE {DocumentsTableSql} SET IndexStatus = @status, UpdatedAtUtc = @now WHERE DocumentId = @d",
             connection, tx))
         {
-            touch.Parameters.AddWithValue("@p", logicalPath);
-            touch.Parameters.AddWithValue("@t", Path.GetFileName(logicalPath));
-            touch.Parameters.Add(new SqlParameter("@mod", SqlDbType.TinyInt) { Value = (byte)modality });
             touch.Parameters.Add(new SqlParameter("@status", SqlDbType.TinyInt) { Value = (byte)IndexStatus.Queued });
             touch.Parameters.AddWithValue("@now", now).SqlDbType = SqlDbType.DateTime2;
             touch.Parameters.AddWithValue("@d", documentKey);

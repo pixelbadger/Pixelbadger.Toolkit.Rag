@@ -22,4 +22,26 @@ public static class MediaTypes
         if (AudioExtensions.Contains(ext)) return Modality.Audio;
         return null;
     }
+
+    /// <summary>Media type (Content-Type) for a supported file, from its extension; null for unsupported extensions.</summary>
+    public static string? GetContentType(string filePath) =>
+        Path.GetExtension(filePath).ToLowerInvariant() switch
+        {
+            ".txt" => "text/plain",
+            ".md" => "text/markdown",
+            ".png" => "image/png",
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".webp" => "image/webp",
+            ".gif" => "image/gif",
+            ".bmp" => "image/bmp",
+            ".tif" or ".tiff" => "image/tiff",
+            ".wav" => "audio/wav",
+            ".mp3" => "audio/mpeg",
+            ".m4a" => "audio/mp4",
+            ".flac" => "audio/flac",
+            ".ogg" => "audio/ogg",
+            ".opus" => "audio/opus",
+            ".aac" => "audio/aac",
+            _ => null
+        };
 }
