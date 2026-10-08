@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
 
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <Version>5.0.0</Version>
+    <Version>6.0.0</Version>
     <Authors>Pixelbadger</Authors>
     <Description>An ASP.NET Core service for RAG (Retrieval-Augmented Generation) workflows: queued multipart ingest, REST query and an MCP (Streamable HTTP) Search tool over vector search (SQL Server) of text, image and audio documents embedded locally with EmbeddingGemma 2 (ONNX).</Description>
     <RepositoryUrl>https://github.com/pixelbadger/Pixelbadger.Toolkit.Rag</RepositoryUrl>
@@ -29,6 +29,9 @@
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
     <PackageReference Include="SkiaSharp" Version="4.153.1" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.153.1" />
+    <PackageReference Include="SlimMessageBus.Host.Outbox.Sql" Version="3.5.0" />
+    <PackageReference Include="SlimMessageBus.Host.Serialization.SystemTextJson" Version="3.5.0" />
+    <PackageReference Include="SlimMessageBus.Host.Sql" Version="3.5.0" />
   </ItemGroup>
 
   <ItemGroup>

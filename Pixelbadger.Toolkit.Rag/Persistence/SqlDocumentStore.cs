@@ -190,8 +190,8 @@ public sealed class SqlDocumentStore : IDocumentStore
         await using var db = CreateContext();
         await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
 
-        // Jobs first, then the document (which cascades to chunks): the ingest queue's claim locks a job row and then
-        // updates its document, so taking the locks in the same order avoids a deadlock with a concurrent claim.
+        // Jobs first, then the document (which cascades to chunks): the ingest queue's begin-processing locks a job row and
+        // then updates its document, so taking the locks in the same order avoids a deadlock with it.
         await db.IngestJobs.Where(j => j.Document!.GlobalId == documentId).ExecuteDeleteAsync(cancellationToken);
         var deleted = await db.Documents.Where(d => d.GlobalId == documentId).ExecuteDeleteAsync(cancellationToken);
         await tx.CommitAsync(cancellationToken);

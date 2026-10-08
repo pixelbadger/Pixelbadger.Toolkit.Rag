@@ -23,8 +23,8 @@ catch (RagConfigurationException ex)
 // OpenTelemetry, exported over OTLP when the Aspire AppHost (locally or in Azure) supplies an endpoint.
 builder.AddServiceDefaults();
 
-// Scale-to-zero hosting (Azure Container Apps via the Aspire AppHost): a storage queue tells the platform the ingest
-// worker is busy. Its own health check stays off: /health must not depend on Azure Storage.
+// Scale-to-zero hosting (Azure Container Apps via the Aspire AppHost): a storage queue tells the platform ingest
+// is busy. Its own health check stays off: /health must not depend on Azure Storage.
 if (!string.IsNullOrWhiteSpace(builder.Configuration.GetConnectionString(QueueIngestKeepAlive.ConnectionName)))
 {
     builder.AddAzureQueue(QueueIngestKeepAlive.ConnectionName, settings => settings.DisableHealthChecks = true);

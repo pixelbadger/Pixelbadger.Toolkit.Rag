@@ -1,13 +1,15 @@
 using Pixelbadger.Toolkit.Rag.Domain;
 using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Messaging;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Ingestion;
 
 /// <summary>
-/// In-memory <see cref="IIngestQueue"/> with the same document/job, claim, lease, attempt and re-ingest semantics as
-/// <see cref="SqlIngestQueue"/>, so the worker's behaviour can be tested without SQL Server.
+/// In-memory <see cref="IIngestQueue"/> with the same document/job, begin-processing, attempt and re-ingest semantics
+/// as <see cref="SqlIngestQueue"/>, and the same <see cref="JobStatusChanged"/> events (recorded in <see cref="Events"/>
+/// exactly when the SQL implementation publishes them), so the ingest pipeline can be tested without SQL Server.
 /// </summary>
-public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
+public sealed class InMemoryIngestQueue : IIngestQueue
 {
     private sealed class Doc
     {
@@ -32,16 +34,24 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         public DateTime Created = DateTime.UtcNow;
         public DateTime? Started;
         public DateTime? Completed;
-        public DateTime? LeaseExpires;
-        public string? LeaseOwner;
         public string? Error;
     }
 
     private readonly object _gate = new();
     private readonly List<Doc> _docs = new();
+    private readonly List<JobStatusChanged> _events = new();
 
     /// <summary>Fails the next <see cref="EnqueueNewDocumentsAsync"/> after storing this many uploads (atomicity tests).</summary>
     public int? FailEnqueueAfter { get; set; }
+
+    /// <summary>The <see cref="JobStatusChanged"/> events published so far, in order (a snapshot).</summary>
+    public IReadOnlyList<JobStatusChanged> Events
+    {
+        get
+        {
+            lock (_gate) return _events.ToList();
+        }
+    }
 
     public async Task<IReadOnlyList<EnqueuedDocument>> EnqueueNewDocumentsAsync(
         IReadOnlyList<IngestUpload> uploads, int maxChunkCharacters, CancellationToken cancellationToken = default)
@@ -59,8 +69,14 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
             created.Add((doc, job));
         }
 
-        // All or nothing, like the SQL transaction.
-        lock (_gate) _docs.AddRange(created.Select(c => c.Doc));
+        // All or nothing, like the SQL transaction: documents and their Queued events appear together.
+        lock (_gate)
+        {
+            _docs.AddRange(created.Select(c => c.Doc));
+            foreach (var (_, job) in created)
+                _events.Add(new JobStatusChanged(job.Id, IngestJobStatus.Queued));
+        }
+
         return created.Select(c => new EnqueuedDocument(c.Doc.Id, c.Job.Id)).ToList();
     }
 
@@ -81,6 +97,7 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
             ReingestOutcome outcome;
             if (active is not null)
             {
+                // Replaced in place: the status is unchanged, so no event.
                 active.Content = content;
                 active.Path = upload.LogicalPath;
                 active.MaxChunk = maxChunkCharacters;
@@ -92,6 +109,7 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
             {
                 active = new Job { Doc = doc, Status = IngestJobStatus.Queued, MaxChunk = maxChunkCharacters, Path = upload.LogicalPath, Content = content };
                 doc.Jobs.Add(active);
+                _events.Add(new JobStatusChanged(active.Id, IngestJobStatus.Queued));
                 outcome = ReingestOutcome.Created;
             }
 
@@ -103,30 +121,22 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         }
     }
 
-    public Task<IngestJobClaim?> TryClaimNextAsync(string owner, TimeSpan lease, CancellationToken cancellationToken = default)
+    public Task<IngestJobClaim?> BeginProcessingAsync(Guid jobId, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            var now = DateTime.UtcNow;
-            var jobs = _docs.SelectMany(d => d.Jobs).ToList();
-            foreach (var dead in jobs.Where(j => j.Status == IngestJobStatus.Processing && j.LeaseExpires < now && j.Attempts >= settings.MaxAttempts))
-                Fail(dead, dead.Error ?? "abandoned");
-
-            var next = jobs.OrderBy(j => j.Created)
-                .FirstOrDefault(j => j.Status == IngestJobStatus.Queued
-                    || (j.Status == IngestJobStatus.Processing && j.LeaseExpires < now && j.Attempts < settings.MaxAttempts));
-            if (next is null)
+            var job = FindJob(jobId);
+            if (job is null || IngestJob.IsTerminal(job.Status))
                 return Task.FromResult<IngestJobClaim?>(null);
 
-            next.Status = IngestJobStatus.Processing;
-            next.Attempts++;
-            next.LeaseOwner = owner;
-            next.LeaseExpires = now + lease;
-            next.Started ??= now;
-            next.Error = null;
-            next.Doc.Status = IndexStatus.Processing;
+            job.Status = IngestJobStatus.Processing;
+            job.Attempts++;
+            job.Started ??= DateTime.UtcNow;
+            job.Error = null;
+            job.Doc.Status = IndexStatus.Processing;
+            _events.Add(new JobStatusChanged(job.Id, IngestJobStatus.Processing));
             return Task.FromResult<IngestJobClaim?>(new IngestJobClaim(
-                next.Id, next.Doc.Id, next.Attempts, next.MaxChunk, next.Path, next.Content!.Length));
+                job.Id, job.Doc.Id, job.Attempts, job.MaxChunk, job.Path, job.Content!.Length));
         }
     }
 
@@ -136,18 +146,6 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         lock (_gate)
             content = FindJob(jobId)?.Content ?? throw new InvalidOperationException("content not available");
         await destination.WriteAsync(content, cancellationToken);
-    }
-
-    public Task<bool> ExtendLeaseAsync(Guid jobId, string owner, TimeSpan lease, CancellationToken cancellationToken = default)
-    {
-        lock (_gate)
-        {
-            var job = FindJob(jobId);
-            if (job is null || job.Status != IngestJobStatus.Processing || job.LeaseOwner != owner)
-                return Task.FromResult(false);
-            job.LeaseExpires = DateTime.UtcNow + lease;
-            return Task.FromResult(true);
-        }
     }
 
     public Task CompleteAsync(Guid jobId, IngestJobOutcome outcome, CancellationToken cancellationToken = default)
@@ -163,54 +161,17 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
             job.Error = outcome.Error;
             job.Content = null;
             job.Completed = DateTime.UtcNow;
-            job.LeaseOwner = null;
-            job.LeaseExpires = null;
             job.Doc.Status = outcome.Status == IngestJobStatus.Failed ? IndexStatus.Failed : IndexStatus.Indexed;
+            _events.Add(new JobStatusChanged(job.Id, outcome.Status));
         }
 
         return Task.CompletedTask;
     }
 
-    public Task<IngestJobStatus> FailAsync(Guid jobId, string error, CancellationToken cancellationToken = default)
+    public Task<bool> HasActiveJobsAsync(CancellationToken cancellationToken = default)
     {
         lock (_gate)
-        {
-            var job = FindJob(jobId);
-            if (job is null)
-                return Task.FromResult(IngestJobStatus.Failed);
-
-            if (job.Attempts >= settings.MaxAttempts)
-            {
-                Fail(job, error);
-            }
-            else
-            {
-                job.Status = IngestJobStatus.Queued;
-                job.Error = error;
-                job.LeaseOwner = null;
-                job.LeaseExpires = null;
-                job.Doc.Status = IndexStatus.Queued;
-            }
-
-            return Task.FromResult(job.Status);
-        }
-    }
-
-    public Task<int> ResetInFlightJobsAsync(CancellationToken cancellationToken = default)
-    {
-        lock (_gate)
-        {
-            var processing = _docs.SelectMany(d => d.Jobs).Where(j => j.Status == IngestJobStatus.Processing).ToList();
-            foreach (var job in processing)
-            {
-                job.Status = IngestJobStatus.Queued;
-                job.LeaseOwner = null;
-                job.LeaseExpires = null;
-                job.Doc.Status = IndexStatus.Queued;
-            }
-
-            return Task.FromResult(processing.Count);
-        }
+            return Task.FromResult(_docs.SelectMany(d => d.Jobs).Any(j => !IngestJob.IsTerminal(j.Status)));
     }
 
     public Task<DocumentDto?> GetDocumentAsync(Guid documentId, CancellationToken cancellationToken = default)
@@ -245,7 +206,10 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         }
     }
 
-    /// <summary>Simulates the SQL cascade of a document delete (the document and all its jobs vanish).</summary>
+    /// <summary>
+    /// Simulates the SQL cascade of a document delete: the document and all its jobs vanish. No event is published
+    /// (a delete is not a job status change). Returns false when the document is unknown.
+    /// </summary>
     public bool RemoveDocument(Guid documentId)
     {
         lock (_gate) return _docs.RemoveAll(d => d.Id == documentId) > 0;
@@ -265,16 +229,5 @@ public sealed class InMemoryIngestQueue(IngestSettings settings) : IIngestQueue
         await using var source = upload.OpenRead();
         await source.CopyToAsync(buffer, cancellationToken);
         return buffer.ToArray();
-    }
-
-    private static void Fail(Job job, string error)
-    {
-        job.Status = IngestJobStatus.Failed;
-        job.Completed = DateTime.UtcNow;
-        job.Error = error;
-        job.Content = null;
-        job.LeaseOwner = null;
-        job.LeaseExpires = null;
-        job.Doc.Status = IndexStatus.Failed;
     }
 }

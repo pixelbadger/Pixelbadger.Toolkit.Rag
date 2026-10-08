@@ -8,9 +8,11 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Audio;
 using Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
 using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Messaging;
 using Pixelbadger.Toolkit.Rag.Mcp;
 using Pixelbadger.Toolkit.Rag.Persistence;
 using Pixelbadger.Toolkit.Rag.Tests.Support;
+using SlimMessageBus.Host;
 
 namespace Pixelbadger.Toolkit.Rag.Tests.Host;
 
@@ -46,14 +48,16 @@ public class HostDependencyInjectionTests
     [InlineData(typeof(FileReaderFactory))]
     [InlineData(typeof(IIngestQueue))]
     [InlineData(typeof(IngestRequestValidator))]
-    [InlineData(typeof(IngestWorkerSignal))]
     [InlineData(typeof(IngestJobRegistry))]
-    [InlineData(typeof(InFlightJobRecovery))]
     [InlineData(typeof(DocumentService))]
     [InlineData(typeof(RagOptions))]
     [InlineData(typeof(SqlStoreOptions))]
     [InlineData(typeof(EmbeddingModelOptions))]
     [InlineData(typeof(IngestSettings))]
+    [InlineData(typeof(IIngestJobService))]
+    [InlineData(typeof(IVectorIndexService))]
+    [InlineData(typeof(IngestJobConsumer))]
+    [InlineData(typeof(VectorIndexConsumer))]
     public void EveryContractResolvesWithoutModelOrDatabase(Type serviceType)
     {
         using var factory = NewFactory();
@@ -78,8 +82,7 @@ public class HostDependencyInjectionTests
 
     [Theory]
     [InlineData(typeof(DatabaseMigrationHostedService))]
-    [InlineData(typeof(InFlightJobRecoveryHostedService))]
-    [InlineData(typeof(IngestWorker))]
+    [InlineData(typeof(MessageBusStartupService))]
     public void HostedServicesConstructWithoutTouchingTheDatabase(Type hostedType)
     {
         using var factory = NewFactory();
@@ -90,9 +93,9 @@ public class HostDependencyInjectionTests
     }
 
     [Fact]
-    public void HostedServices_AreRegistered_MigrationsThenInFlightReset_ThenWorker()
+    public void HostedServices_AreRegistered_MigrationsThenBus()
     {
-        // Hosted services start in registration order: migrations, then the in-flight job reset, then the worker's first poll.
+        // Hosted services start in registration order: migrations, then the bus consumers.
         using var factory = new RagWebApplicationFactory { UseRealServices = true, KeepHostedServices = true };
         _ = factory.Services;
 
@@ -101,7 +104,29 @@ public class HostDependencyInjectionTests
             .Select(d => d.ImplementationType)
             .ToList();
 
-        hosted.Should().ContainInOrder(typeof(DatabaseMigrationHostedService), typeof(InFlightJobRecoveryHostedService), typeof(IngestWorker));
+        hosted.Should().ContainInOrder(typeof(DatabaseMigrationHostedService), typeof(MessageBusStartupService));
+    }
+
+    [Fact]
+    public void SlimMessageBusHostedService_IsNotRegistered()
+    {
+        // The bus is started by MessageBusStartupService, after the migrations; SlimMessageBus's own hosted service
+        // would build it at host start.
+        const string ownHostedService = "SlimMessageBus.Host.MessageBusHostedService";
+
+        // Control: SlimMessageBus on its own does register that type (so the check below cannot pass vacuously).
+        var plain = new ServiceCollection();
+        plain.AddSlimMessageBus(_ => { });
+        plain.Where(d => d.ServiceType == typeof(IHostedService)).Select(d => d.ImplementationType?.FullName)
+            .Should().Contain(ownHostedService);
+
+        using var factory = new RagWebApplicationFactory { UseRealServices = true, KeepHostedServices = true };
+        _ = factory.Services;
+
+        factory.ServiceDescriptors!
+            .Where(d => d.ServiceType == typeof(IHostedService))
+            .Select(d => d.ImplementationType?.FullName)
+            .Should().NotContain(ownHostedService);
     }
 
     [Fact]
@@ -124,9 +149,7 @@ public class HostDependencyInjectionTests
 
         sp.GetRequiredService<IEmbeddingService>().Should().BeSameAs(sp.GetRequiredService<IEmbeddingService>());
         sp.GetRequiredService<OnnxSessionProvider>().Should().BeSameAs(sp.GetRequiredService<OnnxSessionProvider>());
-        sp.GetRequiredService<IngestWorkerSignal>().Should().BeSameAs(sp.GetRequiredService<IngestWorkerSignal>());
         sp.GetRequiredService<IngestJobRegistry>().Should().BeSameAs(sp.GetRequiredService<IngestJobRegistry>());
-        sp.GetRequiredService<InFlightJobRecovery>().Should().BeSameAs(sp.GetRequiredService<InFlightJobRecovery>());
         sp.GetRequiredService<DocumentService>().Should().NotBeSameAs(sp.GetRequiredService<DocumentService>());
         sp.GetRequiredService<ISearchService>().Should().NotBeSameAs(sp.GetRequiredService<ISearchService>());
         sp.GetRequiredService<IIngestQueue>().Should().NotBeSameAs(sp.GetRequiredService<IIngestQueue>());

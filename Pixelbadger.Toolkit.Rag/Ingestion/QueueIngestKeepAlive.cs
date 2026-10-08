@@ -5,8 +5,8 @@ using Microsoft.Extensions.Logging;
 namespace Pixelbadger.Toolkit.Rag.Ingestion;
 
 /// <summary>
-/// Keeps a marker message in an Azure Storage queue while the ingest worker has work. A Container Apps scale rule on
-/// that queue's length keeps the (otherwise scale-to-zero) replica running until the worker reports idle, so a long
+/// Keeps a marker message in an Azure Storage queue while ingest has work. A Container Apps scale rule on
+/// that queue's length keeps the (otherwise scale-to-zero) replica running until ingest reports idle, so a long
 /// ingest is not cut off when HTTP traffic stops.
 /// <list type="bullet">
 /// <item>Busy: one visible marker with a time-to-live, replaced every <see cref="RefreshAfter"/> while busy (the job
@@ -26,7 +26,7 @@ public sealed class QueueIngestKeepAlive(QueueClient queue, ILogger<QueueIngestK
 
     public static readonly TimeSpan RefreshAfter = TimeSpan.FromMinutes(30);
 
-    // The worker loop and the job heartbeat can both call in.
+    // The job heartbeat and the job/idle paths can all call in.
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SendReceipt? _marker;
     private DateTimeOffset _markedAt;
@@ -103,7 +103,7 @@ public sealed class QueueIngestKeepAlive(QueueClient queue, ILogger<QueueIngestK
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Logged once per outage: the idle loop retries every poll interval.
+            // Logged once per outage: the next busy or idle call retries.
             if (!_failing)
                 logger.LogWarning(ex, "Could not {Action} in the keep-alive queue; the host may scale down while jobs remain (they resume on the next start)", action);
             _failing = true;

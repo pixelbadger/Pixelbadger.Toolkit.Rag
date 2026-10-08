@@ -914,6 +914,102 @@
         "resolved": "4.153.1",
         "contentHash": "Yqg6rChTVh0BUE8QQxtOA3uUBnihfgID4yex/AvDa0+os2bVcBjmI3Qj9tnOB+R1hd/Jry1Gwl8qw5JI9HZG8Q=="
       },
+      "SlimMessageBus": {
+        "type": "Transitive",
+        "resolved": "3.0.0",
+        "contentHash": "iyRBNUjrJ5NKRh3avXtPNtQTJfgizUiNnwMv16WpEqH/GXLJh0hRMcYSZ43ydUhbGnQOGfgVsMiqbIo+2RN04g=="
+      },
+      "SlimMessageBus.Host": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "p7rTz+q9oUAjI19+p+cszMdLZaF2m5EuDFKa8wcpOrDhaWO5VY4fDicS6rSBCMFMu7nHoWTqFZuNEha8ZmtsLQ==",
+        "dependencies": {
+          "Microsoft.Extensions.Hosting.Abstractions": "10.0.9",
+          "Microsoft.Extensions.Logging.Abstractions": "10.0.9",
+          "SlimMessageBus": "3.0.0",
+          "SlimMessageBus.Host.Configuration": "3.5.0",
+          "SlimMessageBus.Host.Interceptor": "3.0.0",
+          "SlimMessageBus.Host.Serialization": "3.3.0"
+        }
+      },
+      "SlimMessageBus.Host.Configuration": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "Typ+ABWowtqTnYVzshJQuDzcMV/f44KfBwctMPiSv47v9pSZ13vdolvn24AdT0M0Dav1vmrt/NK1grD3cqS3FA==",
+        "dependencies": {
+          "Microsoft.Extensions.DependencyInjection.Abstractions": "10.0.9",
+          "SlimMessageBus": "3.0.0",
+          "SlimMessageBus.Host.Interceptor": "3.0.0",
+          "SlimMessageBus.Host.Serialization": "3.3.0"
+        }
+      },
+      "SlimMessageBus.Host.Interceptor": {
+        "type": "Transitive",
+        "resolved": "3.0.0",
+        "contentHash": "6yLhUdkM+OGjmjYslQClu/gzJJo8rDSfOFh7fJI/L8PeDCCaejwthrqIPLMowoiCDrGnWsFcGaOOuvC3zn53NA==",
+        "dependencies": {
+          "SlimMessageBus": "3.0.0"
+        }
+      },
+      "SlimMessageBus.Host.Outbox": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "jBJDNpjVI6ZjUZl1lzy0q5o7dunyCvgLT/j5krVAh7DjjTQl0QGVDhd5oBkTHmISN26KKF5cZioK2Wxtb1NyVA==",
+        "dependencies": {
+          "SlimMessageBus.Host": "3.5.0",
+          "SlimMessageBus.Host.Interceptor": "3.0.0"
+        }
+      },
+      "SlimMessageBus.Host.Outbox.Sql": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "mi9LDeoZVhSaocHVLSwLiJFO8W7UQkszz4Pz1a9of6Ia+CQsVPiv2hpiDo2VIuaT4eBL969UvLB8w6QuEwkRbw==",
+        "dependencies": {
+          "SlimMessageBus.Host.Outbox": "3.5.0",
+          "SlimMessageBus.Host.Sql.Common": "3.5.0"
+        }
+      },
+      "SlimMessageBus.Host.Relational": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "CCHSP/1Tnzi53QYmG6ermGtk/tYiRGEbcyDBqHWN6LpkhTOgvQH1RT1Nb5ybAQyX6j8Ot6dnjTXCf3GSgnrbzw==",
+        "dependencies": {
+          "SlimMessageBus.Host": "3.5.0"
+        }
+      },
+      "SlimMessageBus.Host.Serialization": {
+        "type": "Transitive",
+        "resolved": "3.3.0",
+        "contentHash": "murua12a/XJN9zkkLMvAV36kRo7BHTpbPb/ubVYMM+Sz0rxniZT5cplM4JIifH2RWrbwU3hNVwiNE3gsyRncDg=="
+      },
+      "SlimMessageBus.Host.Serialization.SystemTextJson": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "NutETTRzRGLL4ekfQpsQU3YGMEILp+Tdax7NrkTOf2HsabfqcVsppnSz+a5hmTZlC59MaGQeVu/HwVVWN4xsMg==",
+        "dependencies": {
+          "SlimMessageBus.Host.Configuration": "3.5.0",
+          "SlimMessageBus.Host.Serialization": "3.3.0"
+        }
+      },
+      "SlimMessageBus.Host.Sql": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "kp0mf3k6gT+2lu7MVYYyu3BtBE5qRKepglaHeaSLmqGXermESzjSCnj6ru3k80vT6Oxa0bcrSkbfL/LguRVr3Q==",
+        "dependencies": {
+          "SlimMessageBus.Host": "3.5.0",
+          "SlimMessageBus.Host.Relational": "3.5.0",
+          "SlimMessageBus.Host.Sql.Common": "3.5.0"
+        }
+      },
+      "SlimMessageBus.Host.Sql.Common": {
+        "type": "Transitive",
+        "resolved": "3.5.0",
+        "contentHash": "2aHePrQXZrrZOdKQfYkrc7bzjV56mguVEUjeNzZpHEccS6ep7yPAudV1jwESBlAYlwgFksoSuJu80B7HrIdymA==",
+        "dependencies": {
+          "Microsoft.Data.SqlClient": "7.0.2",
+          "SlimMessageBus.Host": "3.5.0"
+        }
+      },
       "SSH.NET": {
         "type": "Transitive",
         "resolved": "2026.0.0",
@@ -1055,7 +1151,10 @@
           "ModelContextProtocol.AspNetCore": "[2.2.0, )",
           "Pixelbadger.Toolkit.Rag.ServiceDefaults": "[1.0.0, )",
           "SkiaSharp": "[4.153.1, )",
-          "SkiaSharp.NativeAssets.Linux.NoDependencies": "[4.153.1, )"
+          "SkiaSharp.NativeAssets.Linux.NoDependencies": "[4.153.1, )",
+          "SlimMessageBus.Host.Outbox.Sql": "[3.5.0, )",
+          "SlimMessageBus.Host.Serialization.SystemTextJson": "[3.5.0, )",
+          "SlimMessageBus.Host.Sql": "[3.5.0, )"
         }
       },
       "pixelbadger.toolkit.rag.servicedefaults": {

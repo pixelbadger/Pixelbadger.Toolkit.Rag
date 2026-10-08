@@ -24,10 +24,10 @@ public class SqlDocumentStoreTests(SqlServerFixture sql)
     private static DocumentDraft Doc(string name, Modality modality = Modality.Text, string? hash = null)
         => new("data/" + name + ".txt", name + ".txt", modality, hash ?? new string('a', 64));
 
-    /// <summary>What the upload endpoint does before the worker ingests: creates the (Queued) document row and its job.</summary>
+    /// <summary>What the upload endpoint does before ingest runs: creates the (Queued) document row and its job.</summary>
     private static async Task<Guid> NewDocAsync(string cs, string name = "doc")
     {
-        var queue = new SqlIngestQueue(new SqlStoreOptions { ConnectionString = cs }, new IngestSettings());
+        var queue = await TestIngestQueue.CreateAsync(cs);
         var upload = new IngestUpload("data/" + name + ".txt", 1, () => new MemoryStream([1]));
         return (await queue.EnqueueNewDocumentsAsync([upload], 1000)).Single().DocumentId;
     }

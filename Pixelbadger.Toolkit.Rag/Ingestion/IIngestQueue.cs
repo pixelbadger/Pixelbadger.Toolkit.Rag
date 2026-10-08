@@ -23,7 +23,7 @@ public enum ReingestOutcome
 /// <param name="JobId">The queued (or replaced) job; null for <see cref="ReingestOutcome.Conflict"/> and <see cref="ReingestOutcome.NotFound"/>.</param>
 public sealed record ReingestResult(ReingestOutcome Outcome, Guid? JobId = null);
 
-/// <summary>A job claimed by a worker.</summary>
+/// <summary>A job handed to processing by <see cref="IIngestQueue.BeginProcessingAsync"/>.</summary>
 public sealed record IngestJobClaim(
     Guid JobId,
     Guid DocumentId,
@@ -57,72 +57,63 @@ public sealed record DocumentDto(
     IngestJobDto? LatestJob);
 
 /// <summary>
-/// Persistent ingest queue (SQL), organised around documents: each document has a series of jobs, one job is one
-/// file for one document. Safe for concurrent claimers: a job is handed to exactly one claimer at a time, and a
-/// claim that is not renewed lapses so the job can be retried.
+/// Persistent ingest jobs (SQL), organised around documents: each document has a series of jobs, one job is one
+/// file for one document. Every job status change publishes a <see cref="Messaging.JobStatusChanged"/> event in the
+/// same transaction as the write (SlimMessageBus outbox, see <see cref="Messaging.JobEventTransaction"/>): the bus,
+/// not polling, drives the work.
 /// </summary>
 public interface IIngestQueue
 {
     /// <summary>
-    /// In ONE transaction creates, for each upload, a document (status Queued) and a queued job. Returns the ids in
-    /// upload order. All or nothing.
+    /// In ONE transaction creates, for each upload, a document (status Queued) and a queued job, and publishes
+    /// <c>JobStatusChanged(job, Queued)</c> for each. Returns the ids in upload order. All or nothing.
     /// </summary>
     Task<IReadOnlyList<EnqueuedDocument>> EnqueueNewDocumentsAsync(
         IReadOnlyList<IngestUpload> uploads, int maxChunkCharacters, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Re-ingests an existing document. Race-safe: in one transaction the document's latest non-terminal job decides
-    /// the outcome (Processing: <see cref="ReingestOutcome.Conflict"/>; Queued: its content is replaced in place;
-    /// none: a new job is queued). A queued job that a worker claims in the meantime also yields Conflict, so an
-    /// upload is never silently lost.
+    /// the outcome (Processing: <see cref="ReingestOutcome.Conflict"/>; Queued: its content is replaced in place, no
+    /// event since the status is unchanged; none: a new job is queued and <c>JobStatusChanged(job, Queued)</c> is
+    /// published). A queued job that is picked up in the meantime also yields Conflict, so an upload is never
+    /// silently lost.
     /// </summary>
     Task<ReingestResult> EnqueueReingestAsync(
         Guid documentId, IngestUpload upload, int maxChunkCharacters, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Atomically claims the oldest job that is Queued, or Processing with an expired lease and attempts left
-    /// (incrementing Attempts and setting the lease), and marks its document Processing. Jobs whose lease expired
-    /// with no attempts left become Failed. Returns null when nothing is claimable.
+    /// Starts (or, after a crash, restarts) a job: when the job is Queued or Processing it becomes Processing,
+    /// Attempts is incremented, StartedAtUtc is set if unset, its document becomes Processing and
+    /// <c>JobStatusChanged(job, Processing)</c> is published, all in one transaction. Returns null (and changes
+    /// nothing) when the job no longer exists or is already terminal.
     /// </summary>
-    Task<IngestJobClaim?> TryClaimNextAsync(string owner, TimeSpan lease, CancellationToken cancellationToken = default);
+    Task<IngestJobClaim?> BeginProcessingAsync(Guid jobId, CancellationToken cancellationToken = default);
 
     /// <summary>Streams a job's stored bytes into <paramref name="destination"/>.</summary>
     Task ReadContentAsync(Guid jobId, Stream destination, CancellationToken cancellationToken = default);
 
-    /// <summary>Extends the lease; false when the job is no longer Processing under <paramref name="owner"/>.</summary>
-    Task<bool> ExtendLeaseAsync(Guid jobId, string owner, TimeSpan lease, CancellationToken cancellationToken = default);
-
-    /// <summary>Records the job's terminal result, discards its stored bytes and brings the document's status in step.</summary>
+    /// <summary>
+    /// Records the job's terminal result, discards its stored bytes, brings the document's status in step and
+    /// publishes <c>JobStatusChanged(job, outcome.Status)</c>, in one transaction. A job that no longer exists (deleted
+    /// with its document) is a quiet no-op with no event.
+    /// </summary>
     Task CompleteAsync(Guid jobId, IngestJobOutcome outcome, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Records <paramref name="error"/>; the job returns to Queued if attempts remain, else becomes Failed (and its
-    /// bytes are dropped). The document's status follows.
-    /// </summary>
-    Task<IngestJobStatus> FailAsync(Guid jobId, string error, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Startup recovery: puts every Processing job back to Queued (and its document to Queued) and returns how many.
-    /// </summary>
-    /// <remarks>
-    /// Single-process assumption: this instance is the only worker, so anything still Processing belonged to a
-    /// previous process that died. If the app is ever scaled out (multiple workers, so the in-process job registry
-    /// no longer sees every job), remove this and rely on lease expiry in <see cref="TryClaimNextAsync"/> instead.
-    /// </remarks>
-    Task<int> ResetInFlightJobsAsync(CancellationToken cancellationToken = default);
+    /// <summary>True while any job is Queued or Processing.</summary>
+    Task<bool> HasActiveJobsAsync(CancellationToken cancellationToken = default);
 
     /// <summary>A document with its latest job, or null when unknown.</summary>
     Task<DocumentDto?> GetDocumentAsync(Guid documentId, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// One page of jobs (any status, or only <paramref name="status"/>), newest first (CreatedAtUtc, then Id, descending).
-    /// <paramref name="page"/> is 1-based. Stored bytes and lease details are never read.
+    /// <paramref name="page"/> is 1-based. Stored bytes are never read.
     /// </summary>
     Task<IngestJobPage> GetJobsAsync(
         int page, int pageSize, IngestJobStatus? status = null, CancellationToken cancellationToken = default);
 }
 
-/// <summary>A job as listed by <c>/api/jobs</c>. Never carries file bytes or lease details.</summary>
+/// <summary>A job as listed by <c>/api/jobs</c>. Never carries file bytes.</summary>
 /// <param name="ChunkCount">The job's own terminal chunk count (not the document's current total); null until it completes.</param>
 public sealed record IngestJobListItemDto(
     Guid JobId,

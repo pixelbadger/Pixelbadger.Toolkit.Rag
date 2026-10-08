@@ -7,6 +7,7 @@ using Pixelbadger.Toolkit.Rag.Embeddings.Onnx;
 using Pixelbadger.Toolkit.Rag.Embeddings.Text;
 using Pixelbadger.Toolkit.Rag.Embeddings.Vision;
 using Pixelbadger.Toolkit.Rag.Ingestion;
+using Pixelbadger.Toolkit.Rag.Messaging;
 using Pixelbadger.Toolkit.Rag.Persistence;
 
 namespace Pixelbadger.Toolkit.Rag.Components;
@@ -37,12 +38,16 @@ public static class DependencyInjection
         // Ingest queue (SQL) + request validation
         services.AddTransient<IIngestQueue, SqlIngestQueue>();
         services.AddTransient<IngestRequestValidator>();
-        services.AddSingleton<IngestWorkerSignal>();
         services.AddSingleton<IngestJobRegistry>();
-        services.AddSingleton<InFlightJobRecovery>();
         // Program registers QueueIngestKeepAlive first when the keep-alive queue is configured (Azure Container Apps).
         services.TryAddSingleton<IIngestKeepAlive, NoIngestKeepAlive>();
         services.AddTransient<DocumentService>();
+
+        // Job events (SlimMessageBus, SQL transport + outbox on the same database) and the in-process services the
+        // consumers route to.
+        services.AddRagMessaging(options);
+        services.AddTransient<IIngestJobService, IngestJobService>();
+        services.AddTransient<IVectorIndexService, VectorIndexService>();
 
         // Chunking / reading
         services.AddTransient<ITextChunker, MarkdownTextChunker>();
@@ -61,13 +66,12 @@ public static class DependencyInjection
 
     /// <summary>
     /// Registers the background pieces of the web host. Order matters: hosted services start in registration
-    /// order, so migrations run first, then the in-flight job reset, and only then does the worker start polling.
+    /// order, so migrations run first, and only then do the bus consumers start.
     /// </summary>
     public static IServiceCollection AddRagHostedServices(this IServiceCollection services)
     {
         services.AddHostedService<DatabaseMigrationHostedService>();
-        services.AddHostedService<InFlightJobRecoveryHostedService>();
-        services.AddHostedService<IngestWorker>();
+        services.AddHostedService<MessageBusStartupService>();
         return services;
     }
 }

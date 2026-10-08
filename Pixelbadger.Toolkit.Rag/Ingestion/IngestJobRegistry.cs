@@ -1,12 +1,13 @@
 namespace Pixelbadger.Toolkit.Rag.Ingestion;
 
 /// <summary>
-/// Tracks the ingest job the worker is processing right now, so a document delete can cancel it and wait for the
-/// worker to let go of it. In-process only.
+/// Tracks the ingest job being processed right now, so a document delete can cancel it and wait for the processing
+/// to let go of it. In-process only.
 /// </summary>
 /// <remarks>
-/// Single-process assumption: there is one worker in this process, so at most one job is active. If the app is ever
-/// scaled out, cancellation has to travel through shared state (e.g. the database) instead.
+/// Single-process assumption: one job is processed at a time in this process (one consumer per subscription), so at
+/// most one job is active. If the app is ever scaled out, cancellation has to travel through shared state (e.g. the
+/// database) instead.
 /// </remarks>
 public sealed class IngestJobRegistry
 {
@@ -14,8 +15,8 @@ public sealed class IngestJobRegistry
     private ActiveIngestJob? _current;
 
     /// <summary>
-    /// Registers the job the worker is about to process. The returned handle's <see cref="ActiveIngestJob.Token"/> is
-    /// cancelled on shutdown (<paramref name="stoppingToken"/>) or by <see cref="CancelDocument"/>. The worker must
+    /// Registers the job about to be processed. The returned handle's <see cref="ActiveIngestJob.Token"/> is
+    /// cancelled on shutdown (<paramref name="stoppingToken"/>) or by <see cref="CancelDocument"/>. The caller must
     /// dispose the handle when it has finished with the job, whatever the outcome.
     /// </summary>
     public ActiveIngestJob Begin(Guid jobId, Guid documentId, CancellationToken stoppingToken)
@@ -31,7 +32,7 @@ public sealed class IngestJobRegistry
 
     /// <summary>
     /// Cancels the active job if it belongs to <paramref name="documentId"/>. Returns a task that completes when the
-    /// worker has finished with the job (success, failure or cancellation), or null when none is active for it.
+    /// processing has finished with the job (success, failure or cancellation), or null when none is active for it.
     /// </summary>
     public Task? CancelDocument(Guid documentId)
     {
@@ -54,7 +55,7 @@ public sealed class IngestJobRegistry
     }
 }
 
-/// <summary>The job a worker is processing. Dispose it when the worker has finished with the job.</summary>
+/// <summary>The job being processed. Dispose it when processing has finished with the job.</summary>
 public sealed class ActiveIngestJob : IDisposable
 {
     private readonly IngestJobRegistry _registry;
@@ -80,7 +81,7 @@ public sealed class ActiveIngestJob : IDisposable
     /// <summary>True when the cancellation came from <see cref="IngestJobRegistry.CancelDocument"/> (the document is being deleted).</summary>
     public bool CancelRequested => Volatile.Read(ref _cancelRequested) != 0;
 
-    /// <summary>Completes when the worker has finished with the job.</summary>
+    /// <summary>Completes when processing has finished with the job.</summary>
     public Task Finished => _finished.Task;
 
     internal Task Cancel()
